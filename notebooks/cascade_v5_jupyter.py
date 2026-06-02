@@ -127,51 +127,69 @@ print("Coins:", PILOT_COINS if USE_PILOT else f"ALL ({len(TRAINING_COINS)})")
 # ## 2. Helper — jalankan perintah pipeline
 
 # %%
-def run(cmd: str, check: bool = True) -> int:
-    """Jalankan pipeline; stdout langsung ke cell (python -u)."""
-    import os
+def run_inprocess(rel_path: str, *argv: str) -> None:
+    """Jalankan skrip pipeline di kernel yang sama (log tampil di Colab)."""
+    import runpy
 
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
+    path = ROOT / rel_path
+    if not path.exists():
+        raise FileNotFoundError(f"Tidak ada: {path}")
+
+    os.chdir(ROOT)
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
     if IN_COLAB:
-        env["CASCADE_COLAB"] = "1"
+        os.environ["CASCADE_COLAB"] = "1"
+    os.environ["PYTHONUNBUFFERED"] = "1"
 
-    # "python pipeline/..." -> sys.executable -u pipeline/...
-    run_cmd = cmd.strip()
-    if run_cmd.startswith("python "):
-        run_cmd = f'"{sys.executable}" -u {run_cmd[7:]}'
-
+    old_argv = sys.argv[:]
+    sys.argv = [str(path)] + list(argv)
     print("\n" + "=" * 60)
-    print("$", run_cmd)
+    print("IN-PROCESS", rel_path, " ".join(argv))
+    print("ROOT =", ROOT.resolve())
     print("=" * 60)
-    proc = subprocess.run(run_cmd, shell=True, cwd=str(ROOT), env=env)
-    rc = proc.returncode
-    if check and rc != 0:
-        raise RuntimeError(f"Command failed (exit {rc}): {run_cmd}\nJalankan: python tools/audit_pipeline.py")
-    return rc
+    try:
+        runpy.run_path(str(path), run_name="__main__")
+    except SystemExit as e:
+        code = e.code if e.code is not None else 0
+        if code != 0:
+            raise RuntimeError(f"{rel_path} gagal (exit {code})") from e
+    finally:
+        sys.argv = old_argv
 
 
-def coin_flags() -> str:
-    return f"--coins {COINS_ARG}" if USE_PILOT else "--all"
+def pipeline_argv() -> list[str]:
+    """Argumen --coins / --all (+ opsional --holdout)."""
+    args = (["--coins"] + PILOT_COINS) if USE_PILOT else ["--all"]
+    if HOLDOUT_FLAG.strip():
+        args.append("--holdout")
+    return args
 
 
 def run_audit() -> None:
-    """Cek file raw/processed/labeled setelah fetch/clean/engineer."""
-    coins = " ".join(PILOT_COINS if USE_PILOT else TRAINING_COINS)
-    print("\n--- AUDIT DATA ---")
-    run(f"python tools/audit_pipeline.py --coins {coins}")
+    coins = PILOT_COINS if USE_PILOT else TRAINING_COINS
+    run_inprocess("tools/audit_pipeline.py", "--coins", *coins)
 
 # %% [markdown]
 # ## 3. Data — fetch, clean, engineer
 
 # %%
 if RUN_FETCH_CLEAN_ENGINEER:
-    cf = coin_flags()
-    ho = HOLDOUT_FLAG.strip()
-    run(f"python pipeline/01_fetch.py {cf} {ho}".strip())
-    run(f"python pipeline/02_clean.py {cf} {ho}".strip())
-    run(f"python pipeline/03_engineer.py {cf} {ho}".strip())
+    pargs = pipeline_argv()
+    run_inprocess("pipeline/01_fetch.py", *pargs)
+    run_inprocess("pipeline/02_clean.py", *pargs)
+    run_inprocess("pipeline/03_engineer.py", *pargs)
+    from config import LABEL_DIR
+
+    print("LABEL_DIR =", LABEL_DIR.resolve())
+    labeled = list(LABEL_DIR.glob("*_h4_lgbm.parquet"))
+    print("labeled files:", [p.name for p in labeled] or "(KOSONG)")
     run_audit()
+    if not labeled:
+        raise RuntimeError(
+            "Engineer selesai tapi tidak ada *_h4_lgbm.parquet. "
+            "Cek log fetch/clean di atas (harus ada SELESAI 3/3 dan Done 3/3)."
+        )
 
 # %% [markdown]
 # ## 4. Train LGBM (5-class, purged CV)
@@ -190,30 +208,25 @@ def _preflight_lgbm_data() -> None:
 
 if RUN_TRAIN_LGBM:
     _preflight_lgbm_data()
-    # 04: --all = semua *_h4_lgbm.parquet yang ada di data/labeled/
-    import os
-    import runpy
-
-    os.environ["CASCADE_COLAB"] = "1" if IN_COLAB else os.environ.get("CASCADE_COLAB", "")
-    print("Training LGBM (in-process, CASCADE_COLAB=", os.environ.get("CASCADE_COLAB"), ")")
-    runpy.run_path(str(ROOT / "pipeline" / "04_train_lgbm.py"), run_name="__main__")
+    run_inprocess("pipeline/04_train_lgbm.py", "--all")
 
 # %% [markdown]
 # ## 5. LSTM — labels, sequences, OOF residual, train
 
 # %%
 if RUN_LSTM_PIPELINE:
-    run(f"python pipeline/05a_momentum_labels.py {coin_flags()}")
-    run(f"python pipeline/05b_build_sequences.py {coin_flags()}")
-    run("python pipeline/05d_oof_residuals.py --all")
-    run("python pipeline/05c_train_momentum_expert.py --all --run-id " + RUN_ID)
+    ca = pipeline_argv()
+    run_inprocess("pipeline/05a_momentum_labels.py", *ca)
+    run_inprocess("pipeline/05b_build_sequences.py", *ca)
+    run_inprocess("pipeline/05d_oof_residuals.py", "--all")
+    run_inprocess("pipeline/05c_train_momentum_expert.py", "--all", "--run-id", RUN_ID)
 
 # %% [markdown]
 # ## 6. Guardian v3.5
 
 # %%
 if RUN_GUARDIAN:
-    run(f"python pipeline/06_train_guardian.py {coin_flags()}")
+    run_inprocess("pipeline/06_train_guardian.py", *pipeline_argv())
 
 # %% [markdown]
 # ## 7. Holdout backtest (opsional)
@@ -221,22 +234,36 @@ if RUN_GUARDIAN:
 # %%
 if RUN_HOLDOUT:
     if RUN_HOLDOUT_FETCH:
-        run("python pipeline/01_fetch.py --all --holdout")
-        run("python pipeline/02_clean.py --all --holdout")
-        run("python pipeline/03_engineer.py --all --holdout")
-    run(f"python pipeline/07_holdout_backtest.py {coin_flags()} --run-id {RUN_ID}")
+        run_inprocess("pipeline/01_fetch.py", "--all", "--holdout")
+        run_inprocess("pipeline/02_clean.py", "--all", "--holdout")
+        run_inprocess("pipeline/03_engineer.py", "--all", "--holdout")
+    args = pipeline_argv() + ["--run-id", RUN_ID]
+    run_inprocess("pipeline/07_holdout_backtest.py", *args)
 
 # %% [markdown]
 # ## 8. Laporan — benchmark + overfitting
 
 # %%
 if RUN_REPORTS:
-    run("python tools/benchmark_plan.py", check=False)
-    run("python tools/overfitting_report.py", check=False)
+    for tool, targv in [
+        ("tools/benchmark_plan.py", []),
+        ("tools/overfitting_report.py", []),
+    ]:
+        try:
+            run_inprocess(tool, *targv)
+        except RuntimeError:
+            print(f"(skip {tool})")
     if (ROOT / "models" / "runs").exists():
         runs = sorted((ROOT / "models" / "runs").glob("holdout_*"))
         if runs:
-            run(f"python tools/overfitting_report.py --holdout-run {runs[-1]}", check=False)
+            try:
+                run_inprocess(
+                    "tools/overfitting_report.py",
+                    "--holdout-run",
+                    str(runs[-1].relative_to(ROOT)),
+                )
+            except RuntimeError:
+                pass
 
 # %% [markdown]
 # ## 9. Simpan ke Google Drive (Colab, opsional)
@@ -247,7 +274,7 @@ if IN_COLAB and False:  # ubah ke True untuk backup
 
     drive.mount("/content/drive")
     dest = "/content/drive/MyDrive/cascade_v5_backup"
-    run(f"mkdir -p {dest} && cp -r data models reports {dest}", check=False)
+    subprocess.call(f"mkdir -p {dest} && cp -r data models reports {dest}", shell=True)
     print("Backup ke", dest)
 
 # %% [markdown]

@@ -178,7 +178,15 @@ def main():
     if failed:
         logger.warning(f"GAGAL: {failed}")
     logger.info("=" * 60)
+    if not success:
+        logger.error("Fetch gagal semua koin — cek internet/VPN/Binance")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
