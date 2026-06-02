@@ -116,7 +116,7 @@ def backtest_coin(
             logger.warning(f"[{symbol}] Holdout H1 terlalu sedikit — skip")
             return None
 
-        proba_h4 = lgbm_model.predict_proba(build_lgbm_feature_matrix(df_h4))
+        proba_h4 = lgbm_model.predict(build_lgbm_feature_matrix(df_h4))
         lgbm_proba_3 = lgbm_proba_h4_to_h1(proba_h4, h4_index, h1_index)
 
         momentum_strength   = np.full(n_h1, 0.5, dtype=np.float32)

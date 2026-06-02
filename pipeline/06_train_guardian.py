@@ -144,7 +144,7 @@ def generate_labels_for_coin(
     if len(df_h4) < 50 or len(h1_proc) < 100:
         return []
 
-    proba_h4 = lgbm_model.predict_proba(build_lgbm_feature_matrix(df_h4, feat_cols))
+    proba_h4 = lgbm_model.predict(build_lgbm_feature_matrix(df_h4, feat_cols))
     lgbm_proba_3 = lgbm_proba_h4_to_h1(proba_h4, h4_index, h1_index)
     p_long  = lgbm_proba_3[:, 2]
     p_short = lgbm_proba_3[:, 0]

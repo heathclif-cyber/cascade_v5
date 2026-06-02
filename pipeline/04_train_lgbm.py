@@ -95,33 +95,22 @@ def load_all_coins() -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex]:
     return X_all, y_all, t_all
 
 
-def _pad_missing_classes(
-    X_tr: np.ndarray, y_tr: np.ndarray,
-    X_ref: np.ndarray, y_ref: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Append 1 sample per missing class agar LabelEncoder LGBM tidak crash."""
-    present = set(np.unique(y_tr).tolist())
-    for cls in range(LGBM_NUM_CLASSES):
-        if cls not in present:
-            idx = np.where(y_ref == cls)[0]
-            if len(idx):
-                X_tr = np.vstack([X_tr, X_ref[idx[:1]]])
-                y_tr = np.append(y_tr, cls)
-    return X_tr, y_tr
-
-
-def _fit_lgbm(params: dict, X_tr, y_tr, X_val, y_val) -> lgb.LGBMClassifier:
-    model = lgb.LGBMClassifier(**params)
+def _fit_lgbm(params: dict, X_tr, y_tr, X_val, y_val) -> lgb.Booster:
+    """Native lgb.train() — tidak pakai LabelEncoder sklearn, aman untuk fold tanpa semua class."""
+    p = {k: v for k, v in params.items() if k != "n_estimators"}
+    num_boost_round = params.get("n_estimators", 500)
+    dtrain = lgb.Dataset(X_tr, label=y_tr)
+    dval   = lgb.Dataset(X_val, label=y_val, reference=dtrain)
     try:
-        model.fit(
-            X_tr, y_tr,
-            eval_set=[(X_val, y_val)],
+        return lgb.train(
+            p, dtrain,
+            num_boost_round=num_boost_round,
+            valid_sets=[dval],
             callbacks=[
                 lgb.early_stopping(LGBM_EARLY_STOPPING, verbose=False),
                 lgb.log_evaluation(period=-1),
             ],
         )
-        return model
     except Exception as exc:
         if params.get("device_type") == "gpu":
             logger.warning(f"  LGBM GPU gagal ({exc}) — retry CPU")
@@ -136,25 +125,21 @@ def train_fold(
     X_tr: np.ndarray, y_tr: np.ndarray,
     X_val: np.ndarray, y_val: np.ndarray,
     fold_idx: int,
-    X_ref: np.ndarray | None = None,
-    y_ref: np.ndarray | None = None,
-) -> tuple[lgb.LGBMClassifier, float, float, float]:
-    """Train satu fold, return model + val metrics + train F1 (overfit check)."""
-    if X_ref is not None and y_ref is not None:
-        X_tr, y_tr = _pad_missing_classes(X_tr, y_tr, X_ref, y_ref)
-    model = _fit_lgbm(LGBM_PARAMS, X_tr, y_tr, X_val, y_val)
-    y_pred_val = model.predict(X_val)
-    y_prob_val = model.predict_proba(X_val)
-    y_pred_tr  = model.predict(X_tr)
+) -> tuple[lgb.Booster, float, float, float]:
+    """Train satu fold, return booster + val metrics + train F1 (overfit check)."""
+    booster    = _fit_lgbm(LGBM_PARAMS, X_tr, y_tr, X_val, y_val)
+    prob_val   = booster.predict(X_val)                           # (n, 5)
+    prob_tr    = booster.predict(X_tr)
+    y_pred_val = np.argmax(prob_val, axis=1)
+    y_pred_tr  = np.argmax(prob_tr,  axis=1)
 
-    f1_val  = f1_score(y_val, y_pred_val, average="macro", zero_division=0)
-    f1_tr   = f1_score(y_tr, y_pred_tr, average="macro", zero_division=0)
-    ll      = log_loss(
-        y_val, y_prob_val, labels=list(range(LGBM_NUM_CLASSES))
-    )
+    all_labels = list(range(LGBM_NUM_CLASSES))
+    f1_val = f1_score(y_val, y_pred_val, average="macro", zero_division=0, labels=all_labels)
+    f1_tr  = f1_score(y_tr,  y_pred_tr,  average="macro", zero_division=0, labels=all_labels)
+    ll     = log_loss(y_val, prob_val, labels=all_labels)
     logger.info(f"  Fold {fold_idx}: val_F1={f1_val:.4f} train_F1={f1_tr:.4f}  "
-                f"LogLoss={ll:.4f}  best_iter={model.best_iteration_}")
-    return model, f1_val, ll, f1_tr
+                f"LogLoss={ll:.4f}  best_iter={booster.best_iteration}")
+    return booster, f1_val, ll, f1_tr
 
 
 def main():
@@ -179,8 +164,8 @@ def main():
         X_tr, X_val = X[tr_idx], X[val_idx]
         y_tr, y_val = y[tr_idx], y[val_idx]
 
-        model, f1, ll, f1_tr = train_fold(X_tr, y_tr, X_val, y_val, fold_idx, X, y)
-        oof_proba[val_idx] = model.predict_proba(X_val)
+        model, f1, ll, f1_tr = train_fold(X_tr, y_tr, X_val, y_val, fold_idx)
+        oof_proba[val_idx] = model.predict(X_val)
 
         cv_results.append({
             "fold": fold_idx,
@@ -202,8 +187,12 @@ def main():
 
     # ── Final Retrain pada Semua Data ─────────────────────────────────────────
     logger.info("Final retrain on full training data...")
-    final_model = lgb.LGBMClassifier(**{**LGBM_PARAMS, "n_estimators": best_model.best_iteration_ or 500})
-    final_model.fit(X, y)
+    p_final = {k: v for k, v in LGBM_PARAMS.items() if k != "n_estimators"}
+    dtrain_full = lgb.Dataset(X, label=y)
+    final_model = lgb.train(
+        p_final, dtrain_full,
+        num_boost_round=best_model.best_iteration or 500,
+    )
 
     # ── Save ──────────────────────────────────────────────────────────────────
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
