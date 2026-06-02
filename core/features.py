@@ -282,6 +282,42 @@ def compute_lgbm_labels_h4(
     return label.rename("label_lgbm")
 
 
+# ─── H1 Confirmation Signals (Smart Entry Gate only) ─────────────────────────
+
+def compute_h1_confirmation(
+    close: pd.Series,
+    high:  pd.Series,
+    low:   pd.Series,
+    atr:   pd.Series,
+    funding_rate: Optional[pd.Series] = None,
+) -> pd.DataFrame:
+    """
+    Lightweight H1 signals untuk Smart Entry Gate — bukan input LSTM.
+    Rule-based, backward-looking.
+
+    Output kolom:
+      h1_rsi         : RSI(14) H1
+      h1_log_ret_1   : log return H1 bar terbaru
+      h1_accel_sign  : +1 jika momentum H1 membangun, -1 jika melemah
+    """
+    # RSI H1
+    delta  = close.diff()
+    gain   = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+    loss   = (-delta.clip(upper=0)).ewm(span=14, adjust=False).mean()
+    rs     = gain / loss.replace(0, np.nan)
+    h1_rsi = (100 - 100 / (1 + rs)).fillna(50).rename("h1_rsi")
+
+    # Log return bar terbaru
+    h1_ret = np.log(close / close.shift(1)).fillna(0).rename("h1_log_ret_1")
+
+    # Acceleration sign: positif jika momentum 3 bar > momentum 3 bar sebelumnya
+    mom_now  = (close - close.shift(3)).fillna(0)
+    mom_prev = (close.shift(3) - close.shift(6)).fillna(0)
+    h1_accel = np.sign(mom_now - mom_prev).rename("h1_accel_sign")
+
+    return pd.DataFrame({"h1_rsi": h1_rsi, "h1_log_ret_1": h1_ret, "h1_accel_sign": h1_accel})
+
+
 # ─── Main Engineer Function ───────────────────────────────────────────────────
 
 def engineer_features_v5(
@@ -289,23 +325,23 @@ def engineer_features_v5(
     df_h4:      pd.DataFrame,
     symbol:     str,
     symbol_id:  int,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Feature engineering split untuk Cascade v5.
 
+    H4 adalah PRIMARY timeframe untuk semua model.
+    H1 hanya menghasilkan confirmation signals untuk Smart Entry Gate.
+
     Returns:
-      df_lgbm  : H4-resolution DataFrame dengan LGBM_FEATURE_COLS + label_lgbm
-      df_lstm  : H1-resolution DataFrame dengan LSTM_SEQUENCE_COLS
+      h4_lgbm : H4 DataFrame — LGBM_FEATURE_COLS + label_lgbm
+      h4_lstm : H4 DataFrame — LSTM_SEQUENCE_COLS + exhaustion_score (untuk sequence builder)
+      h1_conf : H1 DataFrame — H1_CONFIRMATION_COLS (lightweight, untuk gate saja)
     """
     from config import LGBM_FEATURE_COLS, LSTM_SEQUENCE_COLS, SWING_LEFT_BARS
 
-    # ── H4: LGBM tabular features ─────────────────────────────────────────────
+    # ── Hitung ATR H4 ─────────────────────────────────────────────────────────
     h4 = df_h4.copy()
-
-    # ATR H4
     if "atr_14_h4" not in h4.columns:
-        from pandas import Series
-        delta = h4["close"].diff()
         tr = pd.concat([
             h4["high"] - h4["low"],
             (h4["high"] - h4["close"].shift(1)).abs(),
@@ -313,31 +349,54 @@ def engineer_features_v5(
         ], axis=1).max(axis=1)
         h4["atr_14_h4"] = tr.ewm(span=14, adjust=False).mean()
 
-    atr_h4 = h4.get("atr_14_h4", pd.Series(1.0, index=h4.index))
+    atr_h4   = h4["atr_14_h4"]
+    funding  = h4.get("funding_rate", None)
 
-    # Swing levels H4
-    swing_h4 = compute_swing_levels(
-        h4["high"], h4["low"], h4["close"], atr_h4, SWING_LEFT_BARS
-    )
+    # ── Swing levels H4 (backward-only) ──────────────────────────────────────
+    swing_h4 = compute_swing_levels(h4["high"], h4["low"], h4["close"], atr_h4, SWING_LEFT_BARS)
     h4 = pd.concat([h4, swing_h4], axis=1)
+    h4["dist_swing_high"] = h4["distance_from_recent_swing_high_atr"]
+    h4["dist_swing_low"]  = h4["distance_from_recent_swing_low_atr"]
 
-    # Structure break strength
+    # ── Structure break strength H4 ───────────────────────────────────────────
     h4["H4_structure_break_strength"] = compute_h4_structure_break_strength(
         h4["close"], h4["high"], h4["low"], atr_h4
     )
 
-    # Swing distance renamed
-    h4["dist_swing_high"] = h4["distance_from_recent_swing_high_atr"]
-    h4["dist_swing_low"]  = h4["distance_from_recent_swing_low_atr"]
+    # ── LGBM label (5-class, forward-looking — hanya untuk training) ──────────
+    h4["label_lgbm"] = compute_lgbm_labels_h4(h4["close"], atr_h4)
 
-    # 5-class label H4
-    h4["label_lgbm"] = compute_lgbm_labels_h4(
-        h4["close"], atr_h4
+    # ══════════════════════════════════════════════════════════════════════════
+    # H4 LSTM: trajectory features dari H4 (bukan H1)
+    # ══════════════════════════════════════════════════════════════════════════
+    traj_h4 = compute_trajectory_features(
+        close        = h4["close"],
+        high         = h4["high"],
+        low          = h4["low"],
+        volume       = h4["volume"],
+        atr          = atr_h4,
+        funding_rate = funding,
+    )
+    h4_lstm = pd.concat([h4, traj_h4], axis=1)
+
+    # Exhaustion score H4 (dipakai LSTM + Guardian)
+    h4_lstm["exhaustion_score"] = compute_exhaustion_score(
+        close               = h4["close"],
+        high                = h4["high"],
+        low                 = h4["low"],
+        volume              = h4["volume"],
+        atr                 = atr_h4,
+        swing_high          = h4["last_swing_high_price"],
+        swing_low           = h4["last_swing_low_price"],
+        dist_swing_high_atr = h4["distance_from_recent_swing_high_atr"],
+        dist_swing_low_atr  = h4["distance_from_recent_swing_low_atr"],
     )
 
-    # ── H1: LSTM trajectory features ─────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # H1 CONFIRMATION: lightweight signals untuk Smart Entry Gate saja
+    # Tidak dipakai sebagai input LSTM atau LGBM
+    # ══════════════════════════════════════════════════════════════════════════
     h1 = df_h1.copy()
-
     if "atr_14_h1" not in h1.columns:
         tr = pd.concat([
             h1["high"] - h1["low"],
@@ -346,37 +405,13 @@ def engineer_features_v5(
         ], axis=1).max(axis=1)
         h1["atr_14_h1"] = tr.ewm(span=14, adjust=False).mean()
 
-    atr_h1   = h1.get("atr_14_h1", pd.Series(1.0, index=h1.index))
-    funding  = h1.get("funding_rate", None)
-
-    # Swing levels H1 (untuk LSTM distance features)
-    swing_h1 = compute_swing_levels(
-        h1["high"], h1["low"], h1["close"], atr_h1, SWING_LEFT_BARS
-    )
-    h1 = pd.concat([h1, swing_h1], axis=1)
-
-    # Trajectory features
-    traj = compute_trajectory_features(
+    h1_conf = compute_h1_confirmation(
         close        = h1["close"],
         high         = h1["high"],
         low          = h1["low"],
-        volume       = h1["volume"],
-        atr          = atr_h1,
-        funding_rate = funding,
+        atr          = h1["atr_14_h1"],
+        funding_rate = h1.get("funding_rate", None),
     )
-    h1 = pd.concat([h1, traj], axis=1)
+    h1_conf.index = h1.index
 
-    # Exhaustion score H1 (dipakai juga oleh Guardian v3.5)
-    h1["exhaustion_score"] = compute_exhaustion_score(
-        close               = h1["close"],
-        high                = h1["high"],
-        low                 = h1["low"],
-        volume              = h1["volume"],
-        atr                 = atr_h1,
-        swing_high          = h1["last_swing_high_price"],
-        swing_low           = h1["last_swing_low_price"],
-        dist_swing_high_atr = h1["distance_from_recent_swing_high_atr"],
-        dist_swing_low_atr  = h1["distance_from_recent_swing_low_atr"],
-    )
-
-    return h4, h1
+    return h4, h4_lstm, h1_conf

@@ -73,12 +73,13 @@ def compute_momentum_label(
 
 
 def process_coin(symbol: str) -> bool:
-    h1_path = LABEL_DIR / f"{symbol}_h1_lstm.parquet"
-    if not h1_path.exists():
-        logger.warning(f"[{symbol}] H1 LSTM file tidak ditemukan — jalankan 03_engineer dulu")
+    # H4 adalah primary — baca dari h4_lstm (trajectory features H4)
+    h4_path = LABEL_DIR / f"{symbol}_h4_lstm.parquet"
+    if not h4_path.exists():
+        logger.warning(f"[{symbol}] H4 LSTM file tidak ditemukan — jalankan 03_engineer dulu")
         return False
 
-    df = pd.read_parquet(h1_path)
+    df = pd.read_parquet(h4_path)
     df = ensure_utc_index(df)
     df = df[df.index < TRAIN_CUTOFF_DATE]
 

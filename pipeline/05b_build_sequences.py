@@ -29,11 +29,12 @@ logger = setup_logger("05b_build_sequences")
 
 
 def build_sequences_for_coin(symbol: str) -> bool:
-    feat_path  = LABEL_DIR / f"{symbol}_features_v3.parquet"
+    # H4 PRIMARY — baca dari h4_lstm (bukan h1_lstm)
+    feat_path  = LABEL_DIR / f"{symbol}_h4_lstm.parquet"
     label_path = SEQ_DIR   / f"{symbol}_momentum_labels.parquet"
 
     if not feat_path.exists():
-        logger.warning(f"[{symbol}] features tidak ditemukan — skip")
+        logger.warning(f"[{symbol}] H4 LSTM features tidak ditemukan — jalankan 03_engineer dulu")
         return False
     if not label_path.exists():
         logger.warning(f"[{symbol}] momentum_labels tidak ditemukan — jalankan 05a dulu")

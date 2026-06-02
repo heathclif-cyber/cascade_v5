@@ -122,21 +122,36 @@ LGBM_FEATURE_COLS = [
     "open", "high", "low", "close",
 ]
 
-# ─── LSTM Sequence Expert ─────────────────────────────────────────────────────
-# 10 trajectory features — semuanya berbasis H4 sequence atau H1 fast features
-# Berubah signifikan dalam window 32 bar → LSTM bisa belajar pola temporal
+# ─── LSTM Sequence Expert (H4 PRIMARY) ───────────────────────────────────────
+# 10 trajectory features — dihitung dari H4 bars (bukan H1)
+# H4 lebih smooth, swing/exhaustion lebih meaningful, kurang noise
+# Setiap bar = 4 jam → sequence 24 bar = 4 hari context
 LSTM_SEQUENCE_COLS = [
-    "distance_from_recent_swing_high_atr",  # seberapa jauh dari swing high (ATR units)
-    "distance_from_recent_swing_low_atr",   # seberapa jauh dari swing low (ATR units)
-    "run_length_up_bars",                   # berapa bar berturut-turut naik
-    "acceleration_sign_change",             # apakah momentum baru berbalik arah
-    "log_return_acceleration_5",            # percepatan return dalam 5 bar
-    "momentum_delta_5",                     # perubahan momentum 5 bar
-    "funding_extreme_zscore",               # funding rate extreme (z-score)
-    "price_funding_divergence",             # divergence harga vs funding rate
-    "volume_acceleration",                  # percepatan volume (apakah volume naik/turun)
-    "candle_body_size_acceleration",        # percepatan ukuran body candle
+    "distance_from_recent_swing_high_atr",  # jarak dari H4 swing high (ATR units)
+    "distance_from_recent_swing_low_atr",   # jarak dari H4 swing low (ATR units)
+    "run_length_up_bars",                   # H4 bars naik berturut-turut
+    "acceleration_sign_change",             # apakah H4 momentum baru berbalik
+    "log_return_acceleration_5",            # percepatan return 5 H4 bars (20 jam)
+    "momentum_delta_5",                     # delta momentum 5 H4 bars
+    "funding_extreme_zscore",               # funding rate extreme z-score
+    "price_funding_divergence",             # divergence harga H4 vs funding
+    "volume_acceleration",                  # percepatan volume H4
+    "candle_body_size_acceleration",        # percepatan ukuran body H4 candle
 ]
+
+# ─── H1 Selective Confirmation (Smart Entry Gate only) ───────────────────────
+# H1 TIDAK dipakai sebagai input LSTM — hanya sebagai filter timing di gate
+# Rule-based, tidak membutuhkan model tambahan
+H1_CONFIRMATION_ENABLED = True
+H1_CONFIRMATION_COLS = [
+    "h1_rsi",            # RSI H1 untuk konfirmasi arah momentum di level lebih kecil
+    "h1_log_ret_1",      # return H1 bar terbaru (apakah arah sesuai sinyal H4?)
+    "h1_accel_sign",     # acceleration sign H1 (momentum H1 membangun atau melemah?)
+]
+# Threshold untuk H1 confirmation (jika sinyal H4 LONG):
+H1_CONF_RSI_LONG_MIN  = 45.0   # RSI H1 minimal 45 untuk LONG (tidak oversold ekstrem)
+H1_CONF_RSI_SHORT_MAX = 55.0   # RSI H1 maksimal 55 untuk SHORT
+H1_CONF_RET_DIRECTION = True   # H1 return harus searah sinyal H4
 
 # Features yang di-DROP dari v4 (zero importance + zero temporal variance)
 DROP_FEATURES = [
@@ -184,7 +199,7 @@ LGBM_THRESHOLD_LONG  = 0.50   # threshold combined p(weak long) + p(strong long)
 LGBM_THRESHOLD_SHORT = 0.50
 
 # ─── LSTM / AttentionLSTM ─────────────────────────────────────────────────────
-LSTM_SEQ_LEN      = 32    # 32 bar H1 = 32 jam sequence
+LSTM_SEQ_LEN      = 24    # 24 bar H4 = 4 hari sequence (H4 PRIMARY)
 LSTM_HIDDEN       = 128
 LSTM_LAYERS       = 2
 LSTM_DROPOUT      = 0.3
