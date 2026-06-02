@@ -276,8 +276,8 @@ def compute_lgbm_labels_h4(
     close:    pd.Series,
     atr:      pd.Series,
     horizon:  int   = 18,
-    strong_thr: float = 2.5,
-    weak_thr:   float = 1.0,
+    strong_thr: float = 1.8,
+    weak_thr:   float = 0.8,
 ) -> pd.Series:
     """
     5-class ATR-normalized return label untuk LGBM (H4 timeframe).
