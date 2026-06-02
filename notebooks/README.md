@@ -2,9 +2,16 @@
 
 ## Pakai file ini saja
 
-### [`Cascade_v5_Jupyter.ipynb`](Cascade_v5_Jupyter.ipynb)
+### [`Cascade_v5_Jupyter.ipynb`](Cascade_v5_Jupyter.ipynb) ← file ini
 
-Satu notebook untuk **Colab** dan **Jupyter lokal**. Urutan lengkap: setup → fetch → train → laporan.
+Notebook **utama** (Colab + Jupyter lokal). Regenerate dari skrip:
+
+```powershell
+cd notebooks
+python py_percent_to_ipynb.py
+```
+
+Urutan: clone/update → setup → fetch → train LGBM → LSTM → Guardian → laporan.
 
 **Colab**
 

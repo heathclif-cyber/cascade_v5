@@ -27,10 +27,18 @@ def main() -> None:
         i += 2
         body = body.strip("\n")
         if lang == "markdown":
+            md_lines = []
+            for line in body.split("\n"):
+                s = line.strip()
+                if s.startswith("# "):
+                    s = s[2:]
+                elif s == "#":
+                    s = ""
+                md_lines.append(s + "\n")
             cells.append({
                 "cell_type": "markdown",
                 "metadata": {},
-                "source": [line + "\n" for line in body.split("\n")] or [""],
+                "source": md_lines or [""],
             })
         else:
             lines = body.split("\n")
