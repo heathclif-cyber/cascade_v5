@@ -9,7 +9,7 @@ Melatih AttentionLSTM dengan 3 output heads:
 Training:
   - Purged walk-forward CV (8 folds, purge=24 H1 bars)
   - DirectML GPU untuk training, CPU untuk inference
-  - Input: (N, seq_len=32, n_features=10)
+  - Input: (N, seq_len=LSTM_SEQ_LEN, n_features=10) pada bar H4
 
 Jalankan:
   python pipeline/05c_train_momentum_expert.py --all
@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT))
 warnings.filterwarnings("ignore")
 
 from config import (
-    TRAINING_COINS, SEQ_DIR, MODEL_DIR,
+    TRAINING_COINS, SEQ_DIR, MODEL_DIR, LSTM_SEQUENCE_COLS,
     LSTM_SEQ_LEN, LSTM_HIDDEN, LSTM_LAYERS, LSTM_DROPOUT,
     LSTM_EPOCHS, LSTM_PATIENCE, LSTM_BATCH_SIZE, LSTM_LR, LSTM_WEIGHT_DECAY,
     N_FOLDS, PURGE_GAP_BARS,
@@ -151,7 +151,7 @@ def train_single(
     run_id: str,
     fold_idx: int,
     device,
-) -> tuple[AttentionLSTM, float]:
+) -> tuple[AttentionLSTM, float, float, float]:
 
     model = AttentionLSTM(n_features, LSTM_HIDDEN, LSTM_LAYERS, LSTM_DROPOUT).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LSTM_LR, weight_decay=LSTM_WEIGHT_DECAY)
@@ -169,7 +169,8 @@ def train_single(
     tr_loader  = DataLoader(tr_ds,  batch_size=LSTM_BATCH_SIZE, shuffle=True,  drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=LSTM_BATCH_SIZE, shuffle=False)
 
-    best_val   = float("inf")
+    best_val    = float("inf")
+    best_train  = float("inf")
     patience_ct = 0
     best_state  = None
 
@@ -180,12 +181,16 @@ def train_single(
 
         if val_loss < best_val:
             best_val    = val_loss
+            best_train  = tr_loss
             patience_ct = 0
             best_state  = {k: v.cpu().clone() for k, v in model.state_dict().items()}
         else:
             patience_ct += 1
             if patience_ct >= LSTM_PATIENCE:
-                logger.info(f"    Fold {fold_idx} early stop epoch {epoch} | best_val={best_val:.4f}")
+                logger.info(
+                    f"    Fold {fold_idx} early stop epoch {epoch} | "
+                    f"best_val={best_val:.4f} train={best_train:.4f}"
+                )
                 break
 
         if epoch % 10 == 0:
@@ -193,7 +198,7 @@ def train_single(
 
     if best_state:
         model.load_state_dict(best_state)
-    return model, best_val
+    return model, best_val, best_train, float(best_val - best_train)
 
 
 def main():
@@ -213,27 +218,35 @@ def main():
     t = np.arange(len(X))
     folds = build_purged_folds(t, N_FOLDS, PURGE_GAP_BARS)
 
-    cv_losses = []
+    cv_folds = []
     best_fold_loss = float("inf")
     best_fold_model = None
 
     for fold_idx, (tr_idx, val_idx) in enumerate(folds, 1):
         logger.info(f"Fold {fold_idx}/{N_FOLDS} — train={len(tr_idx)} val={len(val_idx)}")
-        model, val_loss = train_single(
+        model, val_loss, train_loss, loss_gap = train_single(
             X[tr_idx], mom[tr_idx], exh[tr_idx], res[tr_idx],
             X[val_idx], mom[val_idx], exh[val_idx], res[val_idx],
             n_features, args.run_id, fold_idx, device,
         )
-        cv_losses.append(val_loss)
+        cv_folds.append({
+            "fold": fold_idx,
+            "val_loss": float(val_loss),
+            "train_loss": float(train_loss),
+            "loss_gap_val_minus_train": float(loss_gap),
+            "n_train": int(len(tr_idx)),
+            "n_val": int(len(val_idx)),
+        })
         if val_loss < best_fold_loss:
             best_fold_loss  = val_loss
             best_fold_model = model
 
+    cv_losses = [f["val_loss"] for f in cv_folds]
     logger.info(f"CV Mean Loss: {np.mean(cv_losses):.4f} ± {np.std(cv_losses):.4f}")
 
     # ── Final Retrain ──────────────────────────────────────────────────────────
     logger.info("Final retrain on full data...")
-    final_model, _ = train_single(
+    final_model, _, _, _ = train_single(
         X, mom, exh, res,
         X[-len(X)//8:], mom[-len(X)//8:], exh[-len(X)//8:], res[-len(X)//8:],
         n_features, args.run_id, 0, device,
@@ -252,18 +265,20 @@ def main():
         shutil.copy(scaler_path[0], MODEL_DIR / "lstm_seq_scaler.pkl")
 
     # Save meta
-    meta = {
-        "run_id":      args.run_id,
-        "n_features":  n_features,
-        "seq_len":     LSTM_SEQ_LEN,
-        "hidden":      LSTM_HIDDEN,
-        "layers":      LSTM_LAYERS,
+    cv_payload = {
+        "run_id": args.run_id,
+        "n_features": n_features,
+        "seq_len": LSTM_SEQ_LEN,
         "cv_mean_loss": float(np.mean(cv_losses)),
-        "cv_std_loss":  float(np.std(cv_losses)),
-        "feature_cols": list(ROOT.__class__.__name__),   # resolved at runtime
+        "cv_std_loss": float(np.std(cv_losses)),
+        "folds": cv_folds,
+        "feature_cols": LSTM_SEQUENCE_COLS,
     }
+    with open(MODEL_DIR / "lstm_cv_results.json", "w") as f:
+        json.dump(cv_payload, f, indent=2)
     with open(MODEL_DIR / "lstm_momentum_meta.json", "w") as f:
-        json.dump(meta, f, indent=2)
+        json.dump(cv_payload, f, indent=2)
+    logger.info("CV saved: models/lstm_cv_results.json")
     logger.info("Done.")
 
 

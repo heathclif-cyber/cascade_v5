@@ -3,7 +3,8 @@ pipeline/05a_momentum_labels.py — Momentum + Exhaustion Labels (Cascade v5)
 
 Menghasilkan labels untuk LSTM training:
   momentum_label    : float 0–1 (kekuatan momentum saat ini, backward-only)
-  exhaustion_label  : float 0–1 (exhaustion score — distance + vol + wick + sign change)
+  exhaustion_label  : float 0–1 (max exhaustion long/short — share rencana)
+  exhaustion_long_label / exhaustion_short_label : rule directional (3.5 ATR + accel)
   direction_label   : int 0/1/2 (SHORT/FLAT/LONG dari swing labeling)
 
 ANTI-LEAKAGE:
@@ -31,10 +32,10 @@ warnings.filterwarnings("ignore")
 from config import (
     TRAINING_COINS, LABEL_DIR, SEQ_DIR,
     LSTM_SEQUENCE_COLS,
-    EXHAUSTION_SWING_ATR_THR, EXHAUSTION_VOL_DROP, EXHAUSTION_WICK_RATIO,
+    EXHAUSTION_SWING_ATR_THR,
     LABEL_MAP, TRAIN_CUTOFF_DATE,
 )
-from core.features import compute_exhaustion_score
+from core.features import compute_exhaustion_directional
 from core.utils import setup_logger, ensure_utc_index
 
 logger = setup_logger("05a_momentum_labels")
@@ -96,50 +97,30 @@ def process_coin(symbol: str) -> bool:
 
     # ── Exhaustion label — menggunakan compute_exhaustion_score dari core/features.py
     # Butuh distance dari swing — ambil dari LSTM sequence cols
-    dist_sh = df["distance_from_recent_swing_high_atr"].values if "distance_from_recent_swing_high_atr" in df.columns else np.zeros(len(df))
-    dist_sl = df["distance_from_recent_swing_low_atr"].values  if "distance_from_recent_swing_low_atr"  in df.columns else np.zeros(len(df))
+    dist_sh = (
+        df["distance_from_recent_swing_high_atr"]
+        if "distance_from_recent_swing_high_atr" in df.columns
+        else pd.Series(0.0, index=df.index)
+    )
+    dist_sl = (
+        df["distance_from_recent_swing_low_atr"]
+        if "distance_from_recent_swing_low_atr" in df.columns
+        else pd.Series(0.0, index=df.index)
+    )
+    accel = (
+        df["acceleration_sign_change"]
+        if "acceleration_sign_change" in df.columns
+        else pd.Series(0.0, index=df.index)
+    )
 
-    # Exhaustion menggunakan threshold v5: 3.5 ATR + acceleration sign change
-    n      = len(df)
-    exh    = np.zeros(n, dtype=np.float32)
-    high   = df["high"].values  if "high"  in df.columns else close
-    low    = df["low"].values   if "low"   in df.columns else close
-    vol_a  = volume
-
-    for i in range(10, n):
-        if atr[i] <= 0 or np.isnan(atr[i]):
-            continue
-
-        signals = 0
-        fired   = 0.0
-
-        # Signal 1: Over-extended dari swing (threshold v5: 3.5 ATR)
-        if abs(dist_sh[i]) > EXHAUSTION_SWING_ATR_THR or abs(dist_sl[i]) > EXHAUSTION_SWING_ATR_THR:
-            fired += 1.0
-        signals += 1
-
-        # Signal 2: Acceleration sign change (momentum berbalik)
-        if i >= 6:
-            mom_now  = close[i]   - close[i - 3]
-            mom_prev = close[i-3] - close[i - 6]
-            if np.sign(mom_now) != np.sign(mom_prev) and abs(mom_prev) > 1e-10:
-                fired += 1.0
-        signals += 1
-
-        # Signal 3: Volume melemah
-        vol_mean = np.mean(vol_a[i-5:i]) if i >= 5 else vol_a[i]
-        if vol_mean > 0 and vol_a[i] / vol_mean < EXHAUSTION_VOL_DROP:
-            fired += 1.0
-        signals += 1
-
-        # Signal 4: Rejection wick
-        candle_range = high[i] - low[i]
-        candle_body  = abs(close[i] - close[i-1])
-        if candle_range > 0 and (1.0 - candle_body / candle_range) > EXHAUSTION_WICK_RATIO:
-            fired += 1.0
-        signals += 1
-
-        exh[i] = min(fired / signals, 1.0)
+    n = len(df)
+    directional = compute_exhaustion_directional(
+        dist_sh, dist_sl, accel, swing_atr_thr=EXHAUSTION_SWING_ATR_THR
+    )
+    exh_long = directional["exhaustion_long_score"].values
+    exh_short = directional["exhaustion_short_score"].values
+    # Label LSTM: agregat arah (max long/short) — selaras unified exhaustion_head
+    exh = np.maximum(exh_long, exh_short)
 
     # ── Direction label (3-class dari swing labeling) ─────────────────────────
     # Ambil dari label yang ada di h4 (downsampled) atau pakai FLAT default
@@ -148,9 +129,11 @@ def process_coin(symbol: str) -> bool:
     # ── Save ──────────────────────────────────────────────────────────────────
     SEQ_DIR.mkdir(parents=True, exist_ok=True)
     out = pd.DataFrame({
-        "momentum_label":   momentum,
-        "exhaustion_label": exh,
-        "direction_label":  dir_label,
+        "momentum_label":          momentum,
+        "exhaustion_label":        exh,
+        "exhaustion_long_label":   exh_long,
+        "exhaustion_short_label":  exh_short,
+        "direction_label":         dir_label,
     }, index=df.index)
 
     out_path = SEQ_DIR / f"{symbol}_momentum_labels.parquet"

@@ -12,7 +12,7 @@ Dimana:
 Protocol anti-leakage:
   - LGBM OOF predictions sudah disimpan saat 04_train_lgbm.py
   - Tidak ada overlap antara train dan val saat OOF computation
-  - Residual per H1 bar dihitung dengan downscale dari H4
+  - Residual per sequence endpoint = bar H4 (bar_indices dari 05b)
 
 Jalankan (setelah 04_train_lgbm.py):
   python pipeline/05d_oof_residuals.py --all
@@ -46,7 +46,7 @@ CLASS_VALUES = np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float32)  # index 
 
 def compute_residuals() -> dict[str, np.ndarray]:
     """
-    Hitung residual per sequence (H1 bar) untuk semua koin.
+    Hitung residual per sequence endpoint (bar H4) untuk semua koin.
     Returns dict: {symbol: residual_array (N_sequences,)}
     """
     oof_path = MODEL_DIR / "lgbm_oof_predictions.npz"
@@ -92,29 +92,10 @@ def compute_residuals() -> dict[str, np.ndarray]:
         coin_residual_h4 = residual_global[offset: offset + n_h4]
         offset += n_h4
 
-        # H4 residual → H1: setiap H1 bar dalam H4 period mendapat residual H4 tsb
-        # Simpel: pakai ffill dari H4 ke H1 resolution
-        # Karena sequence diambil dari H1, kita perlu map H4 residual ke H1 bars
-        # Pendekatan: ambil bar_indices dari sequences, lalu assign residual H4 terdekat
-
-        bar_indices = seq_data["bar_indices"]   # H1 bar index untuk tiap sequence
-
-        # Load H1 timestamps dan H4 timestamps untuk mapping
-        h1_path = LABEL_DIR / f"{symbol}_h1_lstm.parquet"
-        if not h1_path.exists():
-            results[symbol] = np.zeros(n_seq, dtype=np.float32)
-            continue
-
-        df_h1 = pd.read_parquet(h1_path)
-        df_h1 = df_h1[df_h1.index < TRAIN_CUTOFF_DATE]
-
-        # Map: tiap H1 bar → residual dari H4 bar yang berkorespondensi
-        # H4 bar index = H1 index // 4 (approx)
-        h1_to_h4 = np.minimum(
-            (bar_indices // 4).astype(int),
-            len(coin_residual_h4) - 1
-        )
-        seq_residuals = coin_residual_h4[h1_to_h4].astype(np.float32)
+        # bar_indices = index bar H4 pada endpoint sequence (dari 05b)
+        bar_indices = seq_data["bar_indices"].astype(int)
+        bar_indices = np.minimum(bar_indices, len(coin_residual_h4) - 1)
+        seq_residuals = coin_residual_h4[bar_indices].astype(np.float32)
         results[symbol] = seq_residuals
 
         # Update sequences.npz dengan residual

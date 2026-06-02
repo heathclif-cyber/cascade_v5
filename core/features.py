@@ -3,7 +3,7 @@ core/features.py — Cascade v5 Feature Engineering
 
 Dua set fitur yang dipisah secara eksplisit:
   LGBM_FEATURE_COLS  : ~60 tabular + structure features (snapshot ok)
-  LSTM_SEQUENCE_COLS : 10 trajectory features (temporal variance tinggi)
+  LSTM_SEQUENCE_COLS : 10 trajectory features H4
 
 Prinsip anti-leakage:
   - Semua fitur backward-looking (tidak ada shift negatif)
@@ -239,6 +239,35 @@ def compute_exhaustion_score(
         score[i] = min(fired / signals, 1.0)
 
     return pd.Series(score, index=close.index, name="exhaustion_score")
+
+
+def compute_exhaustion_directional(
+    dist_swing_high_atr: pd.Series,
+    dist_swing_low_atr: pd.Series,
+    acceleration_sign_change: pd.Series,
+    swing_atr_thr: float = 3.5,
+) -> pd.DataFrame:
+    """
+    Skor exhaustion arah (rencana share):
+      exhaustion_long_score  — overextended ke swing high + percepatan berbalik turun
+      exhaustion_short_score — overextended ke swing low  + percepatan berbalik naik
+
+    LSTM tetap satu head `exhaustion_score` (agregat); kolom ini untuk label/audit.
+    """
+    asc = acceleration_sign_change.fillna(0)
+    long_score = (
+        (dist_swing_high_atr > swing_atr_thr) & (asc < 0)
+    ).astype(np.float32)
+    short_score = (
+        (dist_swing_low_atr > swing_atr_thr) & (asc > 0)
+    ).astype(np.float32)
+    return pd.DataFrame(
+        {
+            "exhaustion_long_score":  long_score,
+            "exhaustion_short_score": short_score,
+        },
+        index=dist_swing_high_atr.index,
+    )
 
 
 # ─── ATR-Based Return Label (LGBM 5-class, H4) ───────────────────────────────

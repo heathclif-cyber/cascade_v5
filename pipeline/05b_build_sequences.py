@@ -2,7 +2,7 @@
 pipeline/05b_build_sequences.py — Build LSTM Sequence Datasets
 
 Membangun sequence dataset (N, seq_len, n_features) untuk AttentionLSTM.
-Hanya menggunakan LSTM_SEQUENCE_COLS (20 trajectory features dengan temporal variance tinggi).
+Hanya menggunakan LSTM_SEQUENCE_COLS (10 trajectory features H4).
 
 Jalankan:
   python pipeline/05b_build_sequences.py --all

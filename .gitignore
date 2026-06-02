@@ -14,6 +14,9 @@ models/*.joblib
 models/runs/*/
 !models/runs/.gitkeep
 reports/experiments/*.csv
+reports/overfitting_*.md
+reports/overfitting_*.json
+agent-tools/
 _analysis/__pycache__/
 .venv/
 venv/

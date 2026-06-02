@@ -1,6 +1,7 @@
 """
-config.py — Cascade v5: Exhaustion-Aware Residual Momentum Hybrid
-H4 Primary + Attention LSTM + Dynamic Fusion + Guardian v3.5
+config.py — Cascade v5: Focused Residual + Exhaustion Hybrid (H4 Primary)
+Attention LSTM + Dynamic Fusion + Guardian v3.5
+Rencana: https://grok.com/share/bGVnYWN5LWNvcHk_55e525f4-0219-45ca-b213-2cb8ec512b5a
 Semua parameter terpusat. Edit di sini, jangan duplikasi.
 """
 
@@ -57,6 +58,29 @@ SWING_LABEL_MAX_HOLD = 24
 TP_SL_FALLBACK_TP    = 2.0
 TP_SL_FALLBACK_SL    = 1.5
 SWING_BUMPER_ATR     = 0.5
+
+# ─── TP/SL Simulation (core/evaluator.py) ─────────────────────────────────────
+TP_SL_HYBRID_MODE              = True
+TP_SL_SWING_FRESHNESS          = True
+TP_SL_STRUCTURAL_FILTER        = False
+TP_SL_RR_GATE_ENABLED          = True
+TP_SL_MIN_RR                   = SWING_LABEL_MIN_RR
+TP_SL_MIN_TP                   = SWING_LABEL_MIN_TP
+TP_SL_MAX_SL                   = SWING_LABEL_MAX_SL
+TP_SL_SLIPPAGE_ENABLED         = True
+TP_SL_TRIGGER_MODE             = "highlow"   # "close" | "highlow"
+TP_SL_SIZING_MODE              = "fixed"     # "fixed" | "tiered"
+TP_SL_COOLDOWN_ENABLED         = True
+TP_SL_STRUCTURAL_TOLERANCE     = 0.04
+TP_SL_VOLR_CONDITIONAL_ENABLED = False
+TP_SL_VOLR_THRESHOLD           = 0.2
+TP_SL_MAX_SL_VOLR_LOW          = 8.0
+TP_SL_VOLR_DISABLE_MAX_SL      = False
+TP_SL_MAX_SL_PCT_ENABLED       = False
+TP_SL_MAX_SL_PCT               = 0.30
+TP_SL_MAX_SWING_DEVIATION_PCT  = 0.15
+TP_SL_INDIVIDUAL_SWING_FRESHNESS = False
+TP_SL_SIZING_WITH_TREND_HALF   = False
 
 # ─── Swing Calculation ────────────────────────────────────────────────────────
 # Hanya backward-looking — tidak ada look-ahead leakage
@@ -226,6 +250,9 @@ ENTRY_HIGH_CONV_PROB_THR     = 0.60
 # ─── Guardian v3.5 ────────────────────────────────────────────────────────────
 GUARDIAN_ENABLED            = True
 GUARDIAN_EXIT_THRESHOLD     = 0.60
+GUARDIAN_SL_EXIT_THRESHOLD  = 0.55
+GUARDIAN_SL_SAFETY_ATR      = 1.5
+GUARDIAN_TP_ATR             = 2.0
 GUARDIAN_MIN_HOLD_BARS      = 3
 GUARDIAN_ACTIVATION_ATR     = 1.0
 GUARDIAN_PARTIAL_EXIT_RATIO = 0.50
@@ -245,3 +272,32 @@ GUARDIAN_DYNAMIC_FEATURES = [
 TRAILING_STOP_ENABLED  = False
 TRAILING_STOP_ATR      = 2.0
 TRAILING_STOP_MIN_BARS = 2
+
+# ─── Overfitting report thresholds (tools/overfitting_report.py) ─────────────
+OVERFIT_CV_F1_STD_WARN        = 0.25   # std/mean val metric across folds
+OVERFIT_LGBM_F1_GAP_WARN      = 0.08   # mean(train_f1 - val_f1)
+OVERFIT_LGBM_F1_GAP_FAIL      = 0.15
+OVERFIT_LSTM_LOSS_GAP_WARN    = 0.15   # mean(val_loss - train_loss)
+OVERFIT_LSTM_LOSS_GAP_FAIL    = 0.30
+OVERFIT_OOF_LL_GAP_WARN       = 0.15   # oof_ll - insample_ll (positif = overfit)
+OVERFIT_CALIB_GAP_WARN        = 0.03   # conf_wrong - conf_correct
+OVERFIT_HOLDOUT_WR_GAP_WARN   = 0.15   # dokumentasi; WR rendah + CV F1 tinggi
+
+# ─── Google Colab (set CASCADE_COLAB=1 atau tools.colab_bootstrap.apply_colab_settings) ─
+COLAB_QUICK_COINS = ["SOLUSDT", "ETHUSDT", "BNBUSDT"]
+
+
+def apply_colab_settings() -> None:
+    """LightGBM OpenCL GPU tidak stabil di Colab — pakai CPU; LSTM pakai CUDA via PyTorch."""
+    import os
+    os.environ["CASCADE_COLAB"] = "1"
+    LGBM_PARAMS["device_type"] = "cpu"
+    LGBM_PARAMS.pop("gpu_platform_id", None)
+    LGBM_PARAMS.pop("gpu_device_id", None)
+    LGBM_PARAMS["n_jobs"] = 2
+
+
+if __name__ != "__main__" and __import__("os").environ.get("CASCADE_COLAB", "").lower() in (
+    "1", "true", "yes",
+):
+    apply_colab_settings()

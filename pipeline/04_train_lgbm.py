@@ -93,8 +93,8 @@ def train_fold(
     X_tr: np.ndarray, y_tr: np.ndarray,
     X_val: np.ndarray, y_val: np.ndarray,
     fold_idx: int,
-) -> tuple[lgb.LGBMClassifier, float, float]:
-    """Train satu fold, return model + val metrics."""
+) -> tuple[lgb.LGBMClassifier, float, float, float]:
+    """Train satu fold, return model + val metrics + train F1 (overfit check)."""
     model = lgb.LGBMClassifier(**LGBM_PARAMS)
     model.fit(
         X_tr, y_tr,
@@ -104,14 +104,16 @@ def train_fold(
             lgb.log_evaluation(period=-1),
         ],
     )
-    y_pred = model.predict(X_val)
-    y_prob = model.predict_proba(X_val)
+    y_pred_val = model.predict(X_val)
+    y_prob_val = model.predict_proba(X_val)
+    y_pred_tr  = model.predict(X_tr)
 
-    f1  = f1_score(y_val, y_pred, average="macro", zero_division=0)
-    ll  = log_loss(y_val, y_prob)
-    logger.info(f"  Fold {fold_idx}: F1={f1:.4f}  LogLoss={ll:.4f}  "
-                f"best_iter={model.best_iteration_}")
-    return model, f1, ll
+    f1_val  = f1_score(y_val, y_pred_val, average="macro", zero_division=0)
+    f1_tr   = f1_score(y_tr, y_pred_tr, average="macro", zero_division=0)
+    ll      = log_loss(y_val, y_prob_val)
+    logger.info(f"  Fold {fold_idx}: val_F1={f1_val:.4f} train_F1={f1_tr:.4f}  "
+                f"LogLoss={ll:.4f}  best_iter={model.best_iteration_}")
+    return model, f1_val, ll, f1_tr
 
 
 def main():
@@ -135,11 +137,18 @@ def main():
         X_tr, X_val = X[tr_idx], X[val_idx]
         y_tr, y_val = y[tr_idx], y[val_idx]
 
-        model, f1, ll = train_fold(X_tr, y_tr, X_val, y_val, fold_idx)
+        model, f1, ll, f1_tr = train_fold(X_tr, y_tr, X_val, y_val, fold_idx)
         oof_proba[val_idx] = model.predict_proba(X_val)
 
-        cv_results.append({"fold": fold_idx, "f1_macro": f1, "log_loss": ll,
-                           "n_train": len(tr_idx), "n_val": len(val_idx)})
+        cv_results.append({
+            "fold": fold_idx,
+            "f1_macro": f1,
+            "f1_macro_train": f1_tr,
+            "f1_gap_train_minus_val": float(f1_tr - f1),
+            "log_loss": ll,
+            "n_train": len(tr_idx),
+            "n_val": len(val_idx),
+        })
 
         if f1 > best_f1:
             best_f1   = f1
@@ -165,8 +174,9 @@ def main():
 
     np.savez_compressed(
         MODEL_DIR / "lgbm_oof_predictions.npz",
-        oof_proba  = oof_proba,
-        y_true     = y,
+        oof_proba=oof_proba,
+        y_true=y,
+        X=X.astype(np.float32),
     )
     logger.info("OOF predictions saved: models/lgbm_oof_predictions.npz")
 

@@ -22,8 +22,6 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-import torch
-
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 warnings.filterwarnings("ignore")
@@ -31,22 +29,32 @@ warnings.filterwarnings("ignore")
 from config import (
     TRAINING_COINS, MODEL_DIR,
     LGBM_FEATURE_COLS, LSTM_SEQUENCE_COLS,
-    LGBM_NUM_CLASSES,
     MODAL_PER_TRADE, LEVERAGE_SIM, FEE_PER_SIDE, SLIPPAGE_PER_SIDE,
     MAX_HOLDING_BARS, SWING_LABEL_MIN_RR, SWING_LABEL_MIN_TP, SWING_LABEL_MAX_SL,
     TP_SL_FALLBACK_TP, TP_SL_FALLBACK_SL,
     GUARDIAN_ENABLED, GUARDIAN_EXIT_THRESHOLD,
 )
-from core.models import load_attention_lstm, infer_momentum_expert
+from core.models import load_attention_lstm
 from core.fusion import batch_predict
 from core.evaluator import full_trading_report
-from core.utils import setup_logger, ensure_utc_index
+from core.utils import setup_logger
+from pipeline.shared import (
+    load_coin_simulation_data,
+    build_lgbm_feature_matrix,
+    lgbm_proba_h4_to_h1,
+    infer_lstm_on_h4,
+    upsample_h4_to_h1,
+    build_guardian_static_matrix,
+    h4_swing_levels_on_h1,
+)
 
 logger = setup_logger("07_holdout_backtest")
 
 HOLDOUT_START = datetime(2025, 5,  1, tzinfo=timezone.utc)
 HOLDOUT_END   = datetime(2026, 4,  1, tzinfo=timezone.utc)
 HOLDOUT_DIR   = ROOT / "data" / "holdout"
+HOLDOUT_LABEL = HOLDOUT_DIR / "labeled"
+HOLDOUT_PROC  = HOLDOUT_DIR / "processed"
 
 
 def load_models():
@@ -81,105 +89,83 @@ def backtest_coin(
     run_dir:         Path,
 ) -> dict | None:
 
-    h4_path = HOLDOUT_DIR / "labeled" / f"{symbol}_h4_lgbm.parquet"
-    h1_path = HOLDOUT_DIR / "labeled" / f"{symbol}_h1_lstm.parquet"
-
-    if not h4_path.exists() or not h1_path.exists():
-        logger.warning(f"[{symbol}] Holdout data tidak ada — skip")
+    frames = load_coin_simulation_data(symbol, HOLDOUT_LABEL, HOLDOUT_PROC)
+    if frames is None:
+        logger.warning(f"[{symbol}] Holdout data tidak ada — jalankan 01-03 dengan --holdout")
         return None
 
     try:
-        df_h4 = pd.read_parquet(h4_path)
-        df_h1 = pd.read_parquet(h1_path)
-        df_h4 = ensure_utc_index(df_h4)
-        df_h1 = ensure_utc_index(df_h1)
+        df_h4  = frames["h4_lgbm"]
+        df_h4l = frames["h4_lstm"]
+        h1_proc = frames["h1_proc"]
+        h1_conf = frames["h1_conf"]
+        h1_index = frames["h1_index"]
+        h4_index = frames["h4_index"]
 
-        n_h1 = len(df_h1)
+        mask_h1 = (h1_index >= HOLDOUT_START) & (h1_index < HOLDOUT_END)
+        h1_index = h1_index[mask_h1]
+        h1_proc  = h1_proc.loc[h1_index]
+        h1_conf  = h1_conf.loc[h1_index]
 
-        # ── LGBM inference ────────────────────────────────────────────────────
-        X_h4 = np.zeros((len(df_h4), len(LGBM_FEATURE_COLS)), dtype=np.float64)
-        for idx, col in enumerate(LGBM_FEATURE_COLS):
-            if col in df_h4.columns:
-                X_h4[:, idx] = df_h4[col].ffill().fillna(0).values
-
-        lgbm_proba_h4 = lgbm_model.predict_proba(X_h4)  # (N_h4, 5)
-
-        # Collapse 5-class → 3 proba: short, flat, long (untuk fusion)
-        p_long_h4  = lgbm_proba_h4[:, 3] + lgbm_proba_h4[:, 4]
-        p_short_h4 = lgbm_proba_h4[:, 0] + lgbm_proba_h4[:, 1]
-        p_flat_h4  = lgbm_proba_h4[:, 2]
-
-        # Upsample H4 → H1 (ffill)
+        df_h4  = df_h4[(df_h4.index >= HOLDOUT_START) & (df_h4.index < HOLDOUT_END)]
+        df_h4l = df_h4l.reindex(df_h4.index).ffill()
         h4_index = df_h4.index
-        h1_index = df_h1.index
 
-        def upsample_h4_to_h1(arr_h4, idx_h4, idx_h1):
-            s = pd.Series(arr_h4, index=idx_h4)
-            return s.reindex(idx_h1).ffill().fillna(0).values
+        n_h1 = len(h1_index)
+        if n_h1 < 50:
+            logger.warning(f"[{symbol}] Holdout H1 terlalu sedikit — skip")
+            return None
 
-        lgbm_long_h1  = upsample_h4_to_h1(p_long_h4,  h4_index, h1_index)
-        lgbm_short_h1 = upsample_h4_to_h1(p_short_h4, h4_index, h1_index)
+        proba_h4 = lgbm_model.predict_proba(build_lgbm_feature_matrix(df_h4))
+        lgbm_proba_3 = lgbm_proba_h4_to_h1(proba_h4, h4_index, h1_index)
 
-        # ── LSTM inference ────────────────────────────────────────────────────
         momentum_strength   = np.full(n_h1, 0.5, dtype=np.float32)
         exhaustion_score    = np.zeros(n_h1, dtype=np.float32)
         residual_correction = np.zeros(n_h1, dtype=np.float32)
 
         if lstm_model is not None:
-            X_lstm = np.zeros((n_h1, len(LSTM_SEQUENCE_COLS)), dtype=np.float32)
-            for idx, col in enumerate(LSTM_SEQUENCE_COLS):
-                if col in df_h1.columns:
-                    X_lstm[:, idx] = df_h1[col].ffill().fillna(0).values
-
-            # Scale
-            from sklearn.preprocessing import StandardScaler
+            seq_scaler = None
             scaler_path = MODEL_DIR / "lstm_seq_scaler.pkl"
             if scaler_path.exists():
-                scaler  = joblib.load(scaler_path)
-                X_lstm  = scaler.transform(X_lstm)
+                seq_scaler = joblib.load(scaler_path)
+            mom_h4, exh_h4, res_h4 = infer_lstm_on_h4(lstm_model, df_h4l, seq_scaler)
+            momentum_strength = upsample_h4_to_h1(mom_h4, h4_index, h1_index).astype(np.float32)
+            exhaustion_score  = upsample_h4_to_h1(exh_h4, h4_index, h1_index).astype(np.float32)
+            residual_correction = upsample_h4_to_h1(res_h4, h4_index, h1_index).astype(np.float32)
 
-            # Build sequences
-            seq_len = 32
-            X_seq   = np.zeros((n_h1, seq_len, len(LSTM_SEQUENCE_COLS)), dtype=np.float32)
-            for i in range(seq_len - 1, n_h1):
-                X_seq[i] = X_lstm[i - seq_len + 1: i + 1]
-
-            mom, exh, res = infer_momentum_expert(lstm_model, X_seq)
-            momentum_strength[seq_len-1:]   = mom[seq_len-1:]
-            exhaustion_score[seq_len-1:]    = exh[seq_len-1:]
-            residual_correction[seq_len-1:] = res[seq_len-1:]
-
-        # Exhaustion dari feature engineering jika tersedia
-        if "exhaustion_score" in df_h1.columns:
-            exh_feat = df_h1["exhaustion_score"].ffill().fillna(0).values
+        if "exhaustion_score" in df_h4l.columns:
+            exh_feat = upsample_h4_to_h1(
+                df_h4l["exhaustion_score"].values, h4_index, h1_index
+            )
             exhaustion_score = np.maximum(exhaustion_score, exh_feat.astype(np.float32))
 
-        # ── Dynamic Fusion ────────────────────────────────────────────────────
-        lgbm_proba_3 = np.stack([lgbm_short_h1, 1 - lgbm_long_h1 - lgbm_short_h1, lgbm_long_h1], axis=1)
-        lgbm_proba_3 = np.clip(lgbm_proba_3, 0, 1)
+        h1_rsi   = h1_conf["h1_rsi"].values if "h1_rsi" in h1_conf.columns else None
+        h1_ret   = h1_conf["h1_log_ret_1"].values if "h1_log_ret_1" in h1_conf.columns else None
+        h1_accel = h1_conf["h1_accel_sign"].values if "h1_accel_sign" in h1_conf.columns else None
 
         y_pred, confidence = batch_predict(
             lgbm_proba          = lgbm_proba_3,
             momentum_strength   = momentum_strength,
             exhaustion_score    = exhaustion_score,
             residual_correction = residual_correction,
+            h1_rsi              = h1_rsi,
+            h1_log_ret          = h1_ret,
+            h1_accel_sign       = h1_accel,
         )
 
-        # ── Guardian pre-compute ──────────────────────────────────────────────
         X_guardian = None
         if guardian_model is not None:
-            with open(MODEL_DIR / "guardian_feature_cols.json") as f:
-                g_feat_cols = json.load(f)
-            g_static_cols = [c for c in g_feat_cols if not c.startswith("static_") and c in df_h1.columns]
-            X_guardian = df_h1[g_static_cols].ffill().fillna(0).values if g_static_cols else None
+            X_guardian = build_guardian_static_matrix(df_h4, h4_index, h1_index)
 
-        # ── Simulate trades ───────────────────────────────────────────────────
-        close  = df_h1["close"].values  if "close"  in df_h1.columns else np.ones(n_h1)
-        high   = df_h1["high"].values   if "high"   in df_h1.columns else close
-        low    = df_h1["low"].values    if "low"    in df_h1.columns else close
-        atr    = df_h1["atr_14_h1"].values if "atr_14_h1" in df_h1.columns else np.ones(n_h1)
-        sh_arr = df_h1["h4_swing_high"].values if "h4_swing_high" in df_h1.columns else None
-        sl_arr = df_h1["h4_swing_low"].values  if "h4_swing_low"  in df_h1.columns else None
+        close = h1_proc["close"].values
+        high  = h1_proc["high"].values if "high" in h1_proc.columns else close
+        low   = h1_proc["low"].values  if "low" in h1_proc.columns else close
+        atr   = (
+            h1_proc["atr_14_h1"].values
+            if "atr_14_h1" in h1_proc.columns
+            else np.ones(n_h1)
+        )
+        sh_arr, sl_arr = h4_swing_levels_on_h1(df_h4l, h4_index, h1_index)
 
         report = full_trading_report(
             y_pred         = y_pred,
@@ -190,7 +176,7 @@ def backtest_coin(
             low            = low,
             h4_swing_highs = sh_arr,
             h4_swing_lows  = sl_arr,
-            index          = df_h1.index,
+            index          = h1_index,
             modal          = MODAL_PER_TRADE,
             leverages      = LEVERAGE_SIM,
             fee_per_side   = FEE_PER_SIDE,
@@ -206,6 +192,8 @@ def backtest_coin(
             X_guardian      = X_guardian,
             guardian_enabled = guardian_model is not None,
             guardian_exit_threshold = GUARDIAN_EXIT_THRESHOLD,
+            exhaustion_series = exhaustion_score,
+            momentum_series   = momentum_strength,
         )
         return report
 

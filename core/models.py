@@ -33,7 +33,7 @@ class AttentionLSTM(nn.Module):
     """
     LSTM dengan temporal attention + 3 specialized output heads.
 
-    Input : (batch, seq_len, n_features) — 20 trajectory features × 32 bars
+    Input : (batch, seq_len, n_features) — trajectory features H4 (lihat config.LSTM_SEQUENCE_COLS)
     Output: tuple(momentum_strength, exhaustion_score, residual_correction)
             masing-masing shape (batch, 1)
 

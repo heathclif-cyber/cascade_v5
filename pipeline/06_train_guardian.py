@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 warnings.filterwarnings("ignore")
 
 from config import (
-    TRAINING_COINS, LABEL_DIR, MODEL_DIR,
+    TRAINING_COINS, LABEL_DIR, MODEL_DIR, PROC_DIR,
     LGBM_FEATURE_COLS,
     GUARDIAN_DYNAMIC_FEATURES, GUARDIAN_EXIT_THRESHOLD,
     GUARDIAN_N_FOLDS, GUARDIAN_PURGE_GAP_BARS, GUARDIAN_EARLY_STOPPING,
@@ -41,7 +41,15 @@ from config import (
 )
 from core.evaluator import simulate_trades_swing
 from core.utils import setup_logger
-from pipeline.shared import build_purged_folds
+from pipeline.shared import (
+    build_purged_folds,
+    load_coin_simulation_data,
+    build_lgbm_feature_matrix,
+    lgbm_proba_h4_to_h1,
+    upsample_h4_to_h1,
+    h4_swing_levels_on_h1,
+    build_guardian_static_matrix,
+)
 
 logger = setup_logger("06_train_guardian")
 
@@ -110,45 +118,48 @@ def generate_labels_for_coin(
     """
     Simulate trades pada satu koin → hasilkan per-bar labeled samples.
     Label: 0=HOLD, 1=PARTIAL_EXIT, 2=FULL_EXIT
+
+    LGBM inference di H4; simulasi trade di H1 (OHLC dari processed).
     """
-    path = LABEL_DIR / f"{symbol}_h1_lstm.parquet"
-    if not path.exists():
-        # Fallback: coba labeled dari v4 format
-        path = LABEL_DIR / f"{symbol}_features_v3.parquet"
-    if not path.exists():
-        logger.warning(f"[{symbol}] Data tidak ditemukan — skip")
+    frames = load_coin_simulation_data(symbol, LABEL_DIR, PROC_DIR)
+    if frames is None:
+        logger.warning(f"[{symbol}] Data tidak ditemukan — jalankan 02_clean + 03_engineer")
         return []
 
-    df = pd.read_parquet(path)
-    df = df.sort_index()
-    df = df[df.index < TRAIN_CUTOFF_DATE]
-    if len(df) < 100:
+    df_h4   = frames["h4_lgbm"][frames["h4_lgbm"].index < TRAIN_CUTOFF_DATE]
+    df_h4l  = frames["h4_lstm"].reindex(df_h4.index).ffill()
+    h1_proc = frames["h1_proc"][frames["h1_proc"].index < TRAIN_CUTOFF_DATE]
+    h1_index = h1_proc.index
+    h4_index = df_h4.index
+
+    if len(df_h4) < 50 or len(h1_proc) < 100:
         return []
 
-    # Build LGBM feature matrix
-    n = len(df)
-    X = np.zeros((n, len(feat_cols)), dtype=np.float64)
-    for idx, col in enumerate(feat_cols):
-        if col in df.columns:
-            X[:, idx] = df[col].ffill().fillna(0).values
-
-    # Simple predict (no LSTM fusion for Guardian training — hanya LGBM)
-    lgbm_proba = lgbm_model.predict_proba(X)
-    # Collapse 5-class ke 3-class direction
-    p_long  = lgbm_proba[:, 3] + lgbm_proba[:, 4]
-    p_short = lgbm_proba[:, 0] + lgbm_proba[:, 1]
-    y_pred  = np.ones(n, dtype=np.int64)  # default FLAT
-    y_pred[p_long  > 0.50] = 2
+    proba_h4 = lgbm_model.predict_proba(build_lgbm_feature_matrix(df_h4, feat_cols))
+    lgbm_proba_3 = lgbm_proba_h4_to_h1(proba_h4, h4_index, h1_index)
+    p_long  = lgbm_proba_3[:, 2]
+    p_short = lgbm_proba_3[:, 0]
+    n       = len(h1_index)
+    y_pred  = np.ones(n, dtype=np.int64)
+    y_pred[p_long > 0.50]  = 2
     y_pred[p_short > 0.50] = 0
     confidence = np.maximum(p_long, p_short)
 
-    close  = df["close"].values if "close" in df.columns else np.ones(n)
-    high   = df["high"].values  if "high"  in df.columns else close
-    low    = df["low"].values   if "low"   in df.columns else close
-    atr    = df["atr_14_h1"].values if "atr_14_h1" in df.columns else np.ones(n)
-    sh_arr = df["h4_swing_high"].values if "h4_swing_high" in df.columns else np.full(n, np.nan)
-    sl_arr = df["h4_swing_low"].values  if "h4_swing_low"  in df.columns else np.full(n, np.nan)
-    exh    = df["exhaustion_score"].values if "exhaustion_score" in df.columns else np.zeros(n)
+    close = h1_proc["close"].values
+    high  = h1_proc["high"].values if "high" in h1_proc.columns else close
+    low   = h1_proc["low"].values  if "low" in h1_proc.columns else close
+    atr   = (
+        h1_proc["atr_14_h1"].values
+        if "atr_14_h1" in h1_proc.columns
+        else np.ones(n)
+    )
+    sh_arr, sl_arr = h4_swing_levels_on_h1(df_h4l, h4_index, h1_index)
+    if "exhaustion_score" in df_h4l.columns:
+        exh = upsample_h4_to_h1(
+            df_h4l["exhaustion_score"].values, h4_index, h1_index
+        )
+    else:
+        exh = np.zeros(n)
 
     result = simulate_trades_swing(
         y_pred=y_pred, close=close, high=high, low=low, atr=atr,
@@ -160,18 +171,15 @@ def generate_labels_for_coin(
         max_sl_atr=SWING_LABEL_MAX_SL,
         tp_fallback_atr=TP_SL_FALLBACK_TP, sl_fallback_atr=TP_SL_FALLBACK_SL,
         confidence=confidence, guardian_enabled=False,
+        exhaustion_series=exh,
+        momentum_series=np.zeros(n, dtype=np.float32),
     )
 
     trades = result.get("trades", [])
     if not trades:
         return []
 
-    # Static features (LGBM tabular cols yang tersedia)
-    avail_static = [c for c in LGBM_FEATURE_COLS if c in df.columns]
-    X_static = np.zeros((n, len(LGBM_FEATURE_COLS)), dtype=np.float64)
-    for idx, col in enumerate(LGBM_FEATURE_COLS):
-        if col in df.columns:
-            X_static[:, idx] = df[col].ffill().fillna(0).values
+    X_static = build_guardian_static_matrix(df_h4, h4_index, h1_index)
 
     samples = []
     for t_rec in trades:
@@ -275,7 +283,7 @@ def train_guardian(samples_df: pd.DataFrame):
     t     = np.arange(len(X_s))
     folds = build_purged_folds(t, GUARDIAN_N_FOLDS, GUARDIAN_PURGE_GAP_BARS)
 
-    f1_scores = []
+    cv_folds = []
     for fold_idx, (tr_idx, val_idx) in enumerate(folds, 1):
         model = lgb.LGBMClassifier(**GUARDIAN_LGBM_PARAMS)
         model.fit(
@@ -286,12 +294,33 @@ def train_guardian(samples_df: pd.DataFrame):
                 lgb.log_evaluation(period=-1),
             ],
         )
-        f1 = f1_score(y[val_idx], model.predict(X_s[val_idx]),
-                      average="macro", zero_division=0)
-        f1_scores.append(f1)
-        logger.info(f"  Fold {fold_idx}: F1={f1:.4f}")
+        f1_val = f1_score(
+            y[val_idx], model.predict(X_s[val_idx]),
+            average="macro", zero_division=0,
+        )
+        f1_tr = f1_score(
+            y[tr_idx], model.predict(X_s[tr_idx]),
+            average="macro", zero_division=0,
+        )
+        cv_folds.append({
+            "fold": fold_idx,
+            "f1_macro": float(f1_val),
+            "f1_macro_train": float(f1_tr),
+            "f1_gap_train_minus_val": float(f1_tr - f1_val),
+            "n_train": int(len(tr_idx)),
+            "n_val": int(len(val_idx)),
+        })
+        logger.info(f"  Fold {fold_idx}: val_F1={f1_val:.4f} train_F1={f1_tr:.4f}")
 
+    f1_scores = [f["f1_macro"] for f in cv_folds]
     logger.info(f"Guardian CV Mean F1: {np.mean(f1_scores):.4f}")
+
+    with open(MODEL_DIR / "guardian_cv_results.json", "w") as f:
+        json.dump({
+            "mean_f1": float(np.mean(f1_scores)),
+            "std_f1": float(np.std(f1_scores)),
+            "folds": cv_folds,
+        }, f, indent=2)
 
     # Final retrain
     final = lgb.LGBMClassifier(**GUARDIAN_LGBM_PARAMS)

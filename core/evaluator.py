@@ -31,6 +31,7 @@ from config import (
     GUARDIAN_SL_SAFETY_ATR, GUARDIAN_TP_ATR,
     GUARDIAN_MIN_HOLD_BARS, GUARDIAN_ACTIVATION_ATR,
     GUARDIAN_PARTIAL_EXIT_RATIO,
+    MAX_HOLDING_BARS,
     TRAILING_STOP_ENABLED, TRAILING_STOP_ATR, TRAILING_STOP_MIN_BARS,
 )
 from core.utils import setup_logger
@@ -217,16 +218,23 @@ def simulate_trades(
 # ─── Guardian Helper ────────────────────────────────────────────────────────
 
 def _compute_guardian_dynamic(
-    bars_held: int, entry_price: float, current_price: float,
-    direction: int, atr_val: float, max_favorable_pnl: float,
+    bars_held: int,
+    entry_price: float,
+    current_price: float,
+    direction: int,
+    atr_val: float,
+    max_favorable_pnl: float,
+    exhaustion: float = 0.0,
+    momentum: float = 0.0,
 ) -> np.ndarray:
-    """Compute 7 dynamic trade-context features for guardian per-bar check."""
+    """Compute dynamic trade-context features (Guardian v3.5, 9 dims)."""
     pnl_pct = (current_price - entry_price) / entry_price
     if direction == 0:  # SHORT
         pnl_pct = -pnl_pct
 
-    bars_held_norm = bars_held / 24.0  # max_hold=24
-    current_pnl_atr = pnl_pct * entry_price / atr_val if atr_val > 0 else 0.0
+    atr_pct = atr_val / entry_price if entry_price > 0 else 0.01
+    bars_held_norm = bars_held / float(MAX_HOLDING_BARS)
+    current_pnl_atr = pnl_pct / atr_pct if atr_pct > 0 else 0.0
     dd_from_peak = (
         (max_favorable_pnl - pnl_pct) / max_favorable_pnl
         if max_favorable_pnl > 0.001 else 0.0
@@ -239,8 +247,10 @@ def _compute_guardian_dynamic(
         current_pnl_atr,
         max_favorable_pnl,
         dd_from_peak,
-        1.0 if direction == 2 else 0.0,  # direction: 1=LONG(2), 0=SHORT(0)
+        1.0 if direction == 2 else 0.0,
         entry_ratio,
+        exhaustion,
+        momentum,
     ], dtype=np.float64)
 
 
@@ -313,6 +323,9 @@ def simulate_trades_swing(
     pyramiding_enabled:     bool = False,
     pyramiding_max_per_coin: int = 1,
     pyramiding_same_dir:    bool = True,
+    # ── v3.5 context (per H1 bar, upsampled dari H4) ───────────────────────
+    exhaustion_series: np.ndarray = None,
+    momentum_series:   np.ndarray = None,
 ) -> dict:
     """
     Simulasi trade dengan TP/SL dinamis — 2-tier priority:
@@ -586,8 +599,11 @@ def simulate_trades_swing(
                     if bypass_gates or price_moved_atr >= guardian_activation_atr:
                         # Build guardian feature vector: static + dynamic
                         g_static = X_guardian[j, :]
+                        exh_j = float(exhaustion_series[j]) if exhaustion_series is not None else 0.0
+                        mom_j = float(momentum_series[j]) if momentum_series is not None else 0.0
                         g_dynamic = _compute_guardian_dynamic(
                             bars_held, price, close[j], sig, atr_i, mfe_pnl,
+                            exhaustion=exh_j, momentum=mom_j,
                         )
                         g_feat = np.concatenate([g_static, g_dynamic]).reshape(1, -1)
                         g_feat_s = (g_feat - guardian_scaler.mean_) / guardian_scaler.scale_
@@ -929,6 +945,8 @@ def full_trading_report(
     trailing_stop_enabled     = TRAILING_STOP_ENABLED,
     trailing_stop_atr         = TRAILING_STOP_ATR,
     trailing_stop_min_bars    = TRAILING_STOP_MIN_BARS,
+    exhaustion_series         = None,
+    momentum_series           = None,
 ) -> dict:
     """
     Jalankan full trading simulation dan return metrics lengkap.
@@ -984,6 +1002,8 @@ def full_trading_report(
                 trailing_stop_enabled=trailing_stop_enabled,
                 trailing_stop_atr=trailing_stop_atr,
                 trailing_stop_min_bars=trailing_stop_min_bars,
+                exhaustion_series=exhaustion_series,
+                momentum_series=momentum_series,
             )
         else:
             return simulate_trades(
