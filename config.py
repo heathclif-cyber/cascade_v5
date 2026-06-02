@@ -297,7 +297,13 @@ def apply_colab_settings() -> None:
     LGBM_PARAMS["n_jobs"] = 2
 
 
-if __name__ != "__main__" and __import__("os").environ.get("CASCADE_COLAB", "").lower() in (
-    "1", "true", "yes",
-):
+def _colab_lgbm_cpu() -> bool:
+    import os
+    if os.environ.get("CASCADE_COLAB", "").lower() in ("1", "true", "yes"):
+        return True
+    # Subprocess pipeline di Google Colab (tanpa setup_colab di kernel)
+    return bool(os.environ.get("COLAB_RELEASE_TAG"))
+
+
+if _colab_lgbm_cpu():
     apply_colab_settings()

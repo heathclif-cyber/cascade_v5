@@ -71,6 +71,15 @@ GUARDIAN_LGBM_PARAMS = {
     "gpu_device_id":     0,
 }
 
+from config import apply_colab_settings, _colab_lgbm_cpu
+
+if _colab_lgbm_cpu():
+    apply_colab_settings()
+    GUARDIAN_LGBM_PARAMS["device_type"] = "cpu"
+    GUARDIAN_LGBM_PARAMS.pop("gpu_platform_id", None)
+    GUARDIAN_LGBM_PARAMS.pop("gpu_device_id", None)
+    GUARDIAN_LGBM_PARAMS["n_jobs"] = 2
+
 
 def load_models():
     lgbm = joblib.load(MODEL_DIR / "lgbm_tabular.pkl")

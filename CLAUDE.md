@@ -403,7 +403,7 @@ Holdout: jalankan `01`–`03` dengan `--holdout`, lalu `07`.
 ### Perintah eksekusi (training penuh)
 
 ```powershell
-cd cascade-v5-architecture
+cd cascade_v5/notebooks
 python pipeline/01_fetch.py --all
 python pipeline/02_clean.py --all
 python pipeline/03_engineer.py --all
@@ -493,15 +493,17 @@ python tools/benchmark_plan.py
 
 Target: FAIL=0 pada struktur/import/path; SKIP normal jika data belum di-fetch.
 
-## Google Colab / Jupyter
+## Jalankan pipeline (utama = notebook)
 
-Skrip Jupyter: `notebooks/cascade_v5_jupyter.py` · notebook: `Cascade_v5_Jupyter.ipynb` · panduan: `notebooks/README.md`
+**Pintu masuk:** [`notebooks/Cascade_v5_Jupyter.ipynb`](notebooks/Cascade_v5_Jupyter.ipynb) — Colab & Jupyter lokal.
 
 ```text
-Runtime GPU → upload/clone repo → setup_colab() → pipeline 01–07 (pilot 3 koin dulu)
+git clone → %cd notebooks → buka Cascade_v5_Jupyter.ipynb → Runtime GPU → jalankan sel
 ```
 
-Set `CASCADE_COLAB=1` atau `tools.colab_bootstrap.setup_colab()` — LGBM CPU, LSTM CUDA.
+Colab: `!git clone https://github.com/heathclif-cyber/cascade_v5.git /content/cascade_v5`
+
+Skrip `cascade_v5_jupyter.py` hanya untuk maintainer (regenerate `.ipynb`). LGBM CPU + LSTM CUDA via `setup_colab()`.
 
 ## Deteksi overfitting
 

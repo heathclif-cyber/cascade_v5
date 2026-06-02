@@ -12,17 +12,47 @@
 # ---
 
 # %% [markdown]
-# # Cascade v5 — Skrip Jupyter (Colab / lokal)
+# # Cascade v5 — Colab / Jupyter
 #
-# Buka file ini sebagai notebook:
-# - **VS Code / Cursor:** buka `.py` → klik "Run Cell" di setiap `# %%`
-# - **Jupyter:** `jupytext --to notebook cascade_v5_jupyter.py` lalu buka `.ipynb`
-# - **Colab:** upload repo + file ini, runtime **GPU**
+# **Colab:** Runtime → **GPU** → jalankan **semua sel dari atas** (jangan loncat).
 #
 # **MODAL_PER_TRADE = 5.0 USD** (jangan diubah)
 
 # %% [markdown]
-# ## 0. Konfigurasi — edit di sini
+# ## 0a. Colab — clone / update repo (WAJIB sel pertama)
+
+# %%
+import sys
+from pathlib import Path
+
+IN_COLAB = "google.colab" in sys.modules
+ROOT = Path("/content/cascade_v5") if IN_COLAB else Path.cwd()
+if not (ROOT / "config.py").exists() and (ROOT / "notebooks").exists():
+    ROOT = ROOT.parent if (ROOT.parent / "config.py").exists() else ROOT
+
+if IN_COLAB:
+    import subprocess
+    if not (ROOT / "config.py").exists():
+        subprocess.call([
+            "git", "clone", "--depth", "1",
+            "https://github.com/heathclif-cyber/cascade_v5.git",
+            str(ROOT),
+        ])
+    else:
+        subprocess.call(["git", "-C", str(ROOT), "pull", "origin", "master"])
+    # Cek patch bug CV (wajib ada di repo terbaru)
+    shared = (ROOT / "pipeline" / "shared.py").read_text(encoding="utf-8")
+    if "_build_purged_folds_ordinal" not in shared:
+        raise RuntimeError(
+            "Repo masih versi lama. Runtime -> Restart -> jalankan sel ini lagi, "
+            "atau hapus folder /content/cascade_v5 lalu clone ulang."
+        )
+    print("Colab repo OK:", ROOT)
+else:
+    print("Mode lokal, ROOT =", ROOT.resolve())
+
+# %% [markdown]
+# ## 0b. Konfigurasi — edit di sini
 
 # %%
 from __future__ import annotations
@@ -32,13 +62,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# --- path repo (Colab vs lokal) ---
-IN_COLAB = "google.colab" in sys.modules
-
-if IN_COLAB:
-    ROOT = Path("/content/cascade-v5-architecture")
-else:
-    # notebook di notebooks/ → parent = repo root
+# ROOT & IN_COLAB sudah dari sel 0a
+if not IN_COLAB:
     _here = Path.cwd()
     ROOT = _here if (_here / "config.py").exists() else _here.parent
 
@@ -68,19 +93,7 @@ print("IN_COLAB:", IN_COLAB)
 print("ROOT:", ROOT.resolve())
 
 # %% [markdown]
-# ## 1. Clone / mount (Colab saja)
-
-# %%
-if IN_COLAB:
-    REPO_URL = ""  # isi URL git jika clone; kosong = sudah upload manual
-    if REPO_URL:
-        subprocess.call(["git", "clone", REPO_URL, str(ROOT)])
-    else:
-        print(f"Pastikan repo ada di: {ROOT}")
-        print("Atau: Files upload zip -> !unzip -q repo.zip -d /content/")
-
-# %% [markdown]
-# ## 2. Bootstrap environment
+# ## 1. Bootstrap environment
 
 # %%
 os.chdir(ROOT)
@@ -111,16 +124,36 @@ print("MODAL_PER_TRADE:", MODAL_PER_TRADE)
 print("Coins:", PILOT_COINS if USE_PILOT else f"ALL ({len(TRAINING_COINS)})")
 
 # %% [markdown]
-# ## 3. Helper — jalankan perintah pipeline
+# ## 2. Helper — jalankan perintah pipeline
 
 # %%
 def run(cmd: str, check: bool = True) -> int:
     """Jalankan shell command; print stdout realtime."""
+    import os
+
+    env = os.environ.copy()
+    if IN_COLAB:
+        env["CASCADE_COLAB"] = "1"
+
     print("\n" + "=" * 60)
     print("$", cmd)
     print("=" * 60)
-    rc = subprocess.call(cmd, shell=True, cwd=str(ROOT))
+    proc = subprocess.run(cmd, shell=True, cwd=str(ROOT), env=env)
+    rc = proc.returncode
     if check and rc != 0:
+        retry = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        tail = 4000
+        if retry.stdout:
+            print(retry.stdout[-tail:])
+        if retry.stderr:
+            print(retry.stderr[-tail:])
         raise RuntimeError(f"Command failed (exit {rc}): {cmd}")
     return rc
 
@@ -129,7 +162,7 @@ def coin_flags() -> str:
     return f"--coins {COINS_ARG}" if USE_PILOT else "--all"
 
 # %% [markdown]
-# ## 4. Data — fetch, clean, engineer
+# ## 3. Data — fetch, clean, engineer
 
 # %%
 if RUN_FETCH_CLEAN_ENGINEER:
@@ -138,15 +171,32 @@ if RUN_FETCH_CLEAN_ENGINEER:
     run(f"python pipeline/03_engineer.py {coin_flags()} {HOLDOUT_FLAG}".strip())
 
 # %% [markdown]
-# ## 5. Train LGBM (5-class, purged CV)
+# ## 4. Train LGBM (5-class, purged CV)
 
 # %%
+def _preflight_lgbm_data() -> None:
+    from config import LABEL_DIR
+    files = list(LABEL_DIR.glob("*_h4_lgbm.parquet"))
+    if not files:
+        raise RuntimeError(
+            "Tidak ada data/labeled/*_h4_lgbm.parquet — "
+            "jalankan sel 3 (fetch/clean/engineer) dulu."
+        )
+    print(f"Data OK: {len(files)} file parquet")
+
+
 if RUN_TRAIN_LGBM:
-    # 04 hanya --all: pakai semua *_h4_lgbm.parquet yang ada
-    run("python pipeline/04_train_lgbm.py --all")
+    _preflight_lgbm_data()
+    # 04: --all = semua *_h4_lgbm.parquet yang ada di data/labeled/
+    import os
+    import runpy
+
+    os.environ["CASCADE_COLAB"] = "1" if IN_COLAB else os.environ.get("CASCADE_COLAB", "")
+    print("Training LGBM (in-process, CASCADE_COLAB=", os.environ.get("CASCADE_COLAB"), ")")
+    runpy.run_path(str(ROOT / "pipeline" / "04_train_lgbm.py"), run_name="__main__")
 
 # %% [markdown]
-# ## 6. LSTM — labels, sequences, OOF residual, train
+# ## 5. LSTM — labels, sequences, OOF residual, train
 
 # %%
 if RUN_LSTM_PIPELINE:
@@ -156,14 +206,14 @@ if RUN_LSTM_PIPELINE:
     run("python pipeline/05c_train_momentum_expert.py --all --run-id " + RUN_ID)
 
 # %% [markdown]
-# ## 7. Guardian v3.5
+# ## 6. Guardian v3.5
 
 # %%
 if RUN_GUARDIAN:
     run(f"python pipeline/06_train_guardian.py {coin_flags()}")
 
 # %% [markdown]
-# ## 8. Holdout backtest (opsional)
+# ## 7. Holdout backtest (opsional)
 
 # %%
 if RUN_HOLDOUT:
@@ -174,7 +224,7 @@ if RUN_HOLDOUT:
     run(f"python pipeline/07_holdout_backtest.py {coin_flags()} --run-id {RUN_ID}")
 
 # %% [markdown]
-# ## 9. Laporan — benchmark + overfitting
+# ## 8. Laporan — benchmark + overfitting
 
 # %%
 if RUN_REPORTS:
@@ -186,7 +236,7 @@ if RUN_REPORTS:
             run(f"python tools/overfitting_report.py --holdout-run {runs[-1]}", check=False)
 
 # %% [markdown]
-# ## 10. Simpan ke Google Drive (Colab, opsional)
+# ## 9. Simpan ke Google Drive (Colab, opsional)
 
 # %%
 if IN_COLAB and False:  # ubah ke True untuk backup
@@ -198,7 +248,7 @@ if IN_COLAB and False:  # ubah ke True untuk backup
     print("Backup ke", dest)
 
 # %% [markdown]
-# ## 11. Cek artefak
+# ## 10. Cek artefak
 
 # %%
 from pathlib import Path

@@ -14,17 +14,47 @@ from config import (
 )
 
 
-def build_purged_folds(df_index: pd.DatetimeIndex, n_folds: int = N_FOLDS, purge: int = PURGE_GAP_BARS) -> list:
+def _build_purged_folds_ordinal(n_rows: int, n_folds: int, purge: int) -> list:
+    """Expanding-window CV by row order (sequences / fallback)."""
+    splits = np.array_split(np.arange(n_rows), n_folds + 1)
+    folds = []
+    for k in range(1, n_folds + 1):
+        train_idx = np.concatenate(splits[:k])
+        test_idx = splits[k]
+        if len(train_idx) > purge:
+            train_idx = train_idx[:-purge]
+        if len(test_idx) > purge:
+            test_idx = test_idx[purge:]
+        if len(train_idx) > 0 and len(test_idx) > 0:
+            folds.append((train_idx, test_idx))
+    return folds
+
+
+def build_purged_folds(
+    time_index: pd.DatetimeIndex | pd.Index | np.ndarray,
+    n_folds: int = N_FOLDS,
+    purge: int = PURGE_GAP_BARS,
+) -> list:
     """
-    Build expanding-window folds with purging in timestamp space.
-    Pemisahan dilakukan pada level unique timestamps agar tidak terjadi
-    overlap waktu antar koin pada batas fold.
+    Build expanding-window folds with purging.
+
+    - DatetimeIndex / datetime Index: purge di ruang timestamp (multi-coin H4).
+    - ndarray integer / arange: purge di urutan baris (LSTM sequences).
     """
-    unique_ts = np.sort(df_index.unique())
+    if isinstance(time_index, np.ndarray):
+        if time_index.dtype.kind in "iu" or (
+            time_index.size > 0 and isinstance(time_index.flat[0], (int, np.integer))
+        ):
+            return _build_purged_folds_ordinal(len(time_index), n_folds, purge)
+
+    if not isinstance(time_index, (pd.DatetimeIndex, pd.Index)):
+        time_index = pd.Index(time_index)
+
+    unique_ts = np.sort(time_index.unique())
     splits_ts = np.array_split(unique_ts, n_folds + 1)
     
-    row_indices = np.arange(len(df_index))
-    ts_to_idx = pd.Series(row_indices, index=df_index)
+    row_indices = np.arange(len(time_index))
+    ts_to_idx = pd.Series(row_indices, index=time_index)
     
     folds = []
     for k in range(1, n_folds + 1):

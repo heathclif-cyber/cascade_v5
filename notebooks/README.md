@@ -1,44 +1,28 @@
-# Jupyter / Colab
+# Notebook — pintu masuk utama Cascade v5
 
-## File utama
+## Pakai file ini saja
 
-| File | Cara pakai |
-|------|------------|
-| **`cascade_v5_jupyter.py`** | Skrip `# %%` — buka di VS Code/Cursor, klik *Run Cell* per bagian |
-| **`Cascade_v5_Jupyter.ipynb`** | Notebook hasil konversi (25 sel) — Colab / JupyterLab |
-| `Cascade_v5_Colab.ipynb` | Versi ringkas Colab (legacy) |
-| `py_percent_to_ipynb.py` | Regenerate `.ipynb` setelah edit `.py` |
+### [`Cascade_v5_Jupyter.ipynb`](Cascade_v5_Jupyter.ipynb)
 
-```powershell
-cd notebooks
-python py_percent_to_ipynb.py
-```
+Satu notebook untuk **Colab** dan **Jupyter lokal**. Urutan lengkap: setup → fetch → train → laporan.
 
-## Konfigurasi (sel 0 di skrip)
+**Colab**
 
-Edit di `cascade_v5_jupyter.py`:
+1. Runtime → **Change runtime type → GPU**
+2. Clone: `!git clone https://github.com/heathclif-cyber/cascade_v5.git /content/cascade_v5`
+3. `%cd /content/cascade_v5/notebooks`
+4. Buka **`Cascade_v5_Jupyter.ipynb`**
+5. Jalankan semua sel dari atas
 
-```python
-USE_PILOT = True          # 3 koin vs 20 koin
-RUN_FETCH_CLEAN_ENGINEER = True
-RUN_TRAIN_LGBM = True
-RUN_HOLDOUT = False
-```
+**Konfigurasi:** edit variabel di **sel awal** (`USE_PILOT`, `RUN_*`).
 
-## Colab
+---
 
-1. Runtime → **GPU**
-2. Upload repo ke `/content/cascade-v5-architecture`
-3. Buka `Cascade_v5_Jupyter.ipynb` atau `cascade_v5_jupyter.py`
-4. Jalankan sel 0 → 9
+## File lain di folder ini (bukan untuk user)
 
-## Lokal (Jupyter / VS Code)
+| File | Siapa |
+|------|--------|
+| `cascade_v5_jupyter.py` | Maintainer — sumber sel `# %%`; setelah edit: `python py_percent_to_ipynb.py` |
+| `py_percent_to_ipynb.py` | Regenerate `.ipynb` dari `.py` |
 
-1. Buka folder repo sebagai workspace
-2. Buka `notebooks/cascade_v5_jupyter.py`
-3. Pilih kernel Python 3.12 + GPU/CUDA jika ada
-4. `USE_PILOT = True` untuk uji cepat
-
-## Laporan
-
-Sel 9 menjalankan `tools/benchmark_plan.py` dan `tools/overfitting_report.py`.
+Tidak perlu membuka file di atas kalau Anda hanya menjalankan pipeline di Colab.

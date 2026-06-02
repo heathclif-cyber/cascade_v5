@@ -33,16 +33,21 @@ from config import (
     LGBM_NUM_CLASSES, LGBM_LABEL_MAP,
     N_FOLDS, PURGE_GAP_H4,
     TRAIN_CUTOFF_DATE,
+    apply_colab_settings,
+    _colab_lgbm_cpu,
 )
+
+if _colab_lgbm_cpu():
+    apply_colab_settings()
 from pipeline.shared import build_purged_folds
 from core.utils import setup_logger
 
 logger = setup_logger("04_train_lgbm")
 
 
-def load_all_coins() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load H4 LGBM features + labels dari semua koin. Return X, y, time_idx."""
-    all_X, all_y, all_t = [], [], []
+def load_all_coins() -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex]:
+    """Load H4 LGBM features + labels dari semua koin. Return X, y, bar timestamps."""
+    all_X, all_y, all_idx = [], [], []
 
     for symbol in TRAINING_COINS:
         path = LABEL_DIR / f"{symbol}_h4_lgbm.parquet"
@@ -67,12 +72,9 @@ def load_all_coins() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         raw_labels = df["label_lgbm"].values.astype(np.int64)
         y = np.array([LGBM_LABEL_MAP.get(int(l), 2) for l in raw_labels], dtype=np.int64)
 
-        # Time index (ordinal, untuk purged CV)
-        t = np.arange(len(all_t), len(all_t) + len(df))
-
         all_X.append(X)
         all_y.append(y)
-        all_t.append(t)
+        all_idx.append(df.index)
         logger.info(f"  [{symbol}] {len(df)} H4 bars loaded")
 
     if not all_X:
@@ -80,7 +82,11 @@ def load_all_coins() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     X_all = np.vstack(all_X)
     y_all = np.concatenate(all_y)
-    t_all = np.concatenate(all_t)
+    t_all = pd.DatetimeIndex(np.concatenate([np.asarray(ix) for ix in all_idx]))
+    order = np.argsort(t_all.values)
+    X_all = X_all[order]
+    y_all = y_all[order]
+    t_all = t_all[order]
 
     # Distribusi label
     unique, counts = np.unique(y_all, return_counts=True)
@@ -89,28 +95,44 @@ def load_all_coins() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return X_all, y_all, t_all
 
 
+def _fit_lgbm(params: dict, X_tr, y_tr, X_val, y_val) -> lgb.LGBMClassifier:
+    model = lgb.LGBMClassifier(**params)
+    try:
+        model.fit(
+            X_tr, y_tr,
+            eval_set=[(X_val, y_val)],
+            callbacks=[
+                lgb.early_stopping(LGBM_EARLY_STOPPING, verbose=False),
+                lgb.log_evaluation(period=-1),
+            ],
+        )
+        return model
+    except Exception as exc:
+        if params.get("device_type") == "gpu":
+            logger.warning(f"  LGBM GPU gagal ({exc}) — retry CPU")
+            cpu = {**params, "device_type": "cpu", "n_jobs": 2}
+            cpu.pop("gpu_platform_id", None)
+            cpu.pop("gpu_device_id", None)
+            return _fit_lgbm(cpu, X_tr, y_tr, X_val, y_val)
+        raise
+
+
 def train_fold(
     X_tr: np.ndarray, y_tr: np.ndarray,
     X_val: np.ndarray, y_val: np.ndarray,
     fold_idx: int,
 ) -> tuple[lgb.LGBMClassifier, float, float, float]:
     """Train satu fold, return model + val metrics + train F1 (overfit check)."""
-    model = lgb.LGBMClassifier(**LGBM_PARAMS)
-    model.fit(
-        X_tr, y_tr,
-        eval_set=[(X_val, y_val)],
-        callbacks=[
-            lgb.early_stopping(LGBM_EARLY_STOPPING, verbose=False),
-            lgb.log_evaluation(period=-1),
-        ],
-    )
+    model = _fit_lgbm(LGBM_PARAMS, X_tr, y_tr, X_val, y_val)
     y_pred_val = model.predict(X_val)
     y_prob_val = model.predict_proba(X_val)
     y_pred_tr  = model.predict(X_tr)
 
     f1_val  = f1_score(y_val, y_pred_val, average="macro", zero_division=0)
     f1_tr   = f1_score(y_tr, y_pred_tr, average="macro", zero_division=0)
-    ll      = log_loss(y_val, y_prob_val)
+    ll      = log_loss(
+        y_val, y_prob_val, labels=list(range(LGBM_NUM_CLASSES))
+    )
     logger.info(f"  Fold {fold_idx}: val_F1={f1_val:.4f} train_F1={f1_tr:.4f}  "
                 f"LogLoss={ll:.4f}  best_iter={model.best_iteration_}")
     return model, f1_val, ll, f1_tr
@@ -121,6 +143,7 @@ def main():
     parser.add_argument("--all", action="store_true")
     args = parser.parse_args()
 
+    logger.info(f"LGBM device_type={LGBM_PARAMS.get('device_type', '?')}")
     logger.info("Loading data...")
     X, y, t = load_all_coins()
 
@@ -200,4 +223,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
