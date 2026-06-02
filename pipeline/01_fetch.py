@@ -138,9 +138,16 @@ def main():
     for i, symbol in enumerate(coins, 1):
         prog_key = f"{symbol}_{mode_str}"
         if progress.get(prog_key) == "done" and not args.reset:
-            logger.info(f"[{i}/{len(coins)}] {symbol} — sudah selesai, skip")
-            success.append(symbol)
-            continue
+            h1p = output_dir / "klines" / symbol / "1h_all.parquet"
+            h4p = output_dir / "klines" / symbol / "4h_all.parquet"
+            if h1p.exists() and h4p.exists() and h1p.stat().st_size > 500:
+                logger.info(f"[{i}/{len(coins)}] {symbol} — sudah selesai, skip")
+                success.append(symbol)
+                continue
+            logger.warning(
+                f"[{i}/{len(coins)}] {symbol} — progress=done tapi file hilang, fetch ulang"
+            )
+            progress.pop(prog_key, None)
 
         logger.info(f"[{i}/{len(coins)}] Fetching {symbol}...")
         try:

@@ -287,7 +287,14 @@ def main():
     logger.info(f"\nSelesai: {success}/{len(coins)} koin OK")
     if success < len(coins):
         logger.warning(f"{len(coins) - success} koin gagal — cek log di atas")
+    if success == 0:
+        logger.error("Tidak ada koin berhasil — jalankan 01_fetch.py dulu")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)

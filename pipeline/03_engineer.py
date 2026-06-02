@@ -142,7 +142,14 @@ def main():
 
     success = sum(engineer_symbol(c, proc_dir, label_dir) for c in coins)
     logger.info(f"Done: {success}/{len(coins)} coins OK")
+    if success == 0:
+        logger.error("Engineer gagal semua koin — cek 02_clean / raw data")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)

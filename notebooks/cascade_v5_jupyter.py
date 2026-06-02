@@ -128,47 +128,50 @@ print("Coins:", PILOT_COINS if USE_PILOT else f"ALL ({len(TRAINING_COINS)})")
 
 # %%
 def run(cmd: str, check: bool = True) -> int:
-    """Jalankan shell command; print stdout realtime."""
+    """Jalankan pipeline; stdout langsung ke cell (python -u)."""
     import os
 
     env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
     if IN_COLAB:
         env["CASCADE_COLAB"] = "1"
 
+    # "python pipeline/..." -> sys.executable -u pipeline/...
+    run_cmd = cmd.strip()
+    if run_cmd.startswith("python "):
+        run_cmd = f'"{sys.executable}" -u {run_cmd[7:]}'
+
     print("\n" + "=" * 60)
-    print("$", cmd)
+    print("$", run_cmd)
     print("=" * 60)
-    proc = subprocess.run(cmd, shell=True, cwd=str(ROOT), env=env)
+    proc = subprocess.run(run_cmd, shell=True, cwd=str(ROOT), env=env)
     rc = proc.returncode
     if check and rc != 0:
-        retry = subprocess.run(
-            cmd,
-            shell=True,
-            cwd=str(ROOT),
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        tail = 4000
-        if retry.stdout:
-            print(retry.stdout[-tail:])
-        if retry.stderr:
-            print(retry.stderr[-tail:])
-        raise RuntimeError(f"Command failed (exit {rc}): {cmd}")
+        raise RuntimeError(f"Command failed (exit {rc}): {run_cmd}\nJalankan: python tools/audit_pipeline.py")
     return rc
 
 
 def coin_flags() -> str:
     return f"--coins {COINS_ARG}" if USE_PILOT else "--all"
 
+
+def run_audit() -> None:
+    """Cek file raw/processed/labeled setelah fetch/clean/engineer."""
+    coins = " ".join(PILOT_COINS if USE_PILOT else TRAINING_COINS)
+    print("\n--- AUDIT DATA ---")
+    run(f"python tools/audit_pipeline.py --coins {coins}")
+
 # %% [markdown]
 # ## 3. Data — fetch, clean, engineer
 
 # %%
 if RUN_FETCH_CLEAN_ENGINEER:
-    run(f"python pipeline/01_fetch.py {coin_flags()} {HOLDOUT_FLAG}".strip())
-    run(f"python pipeline/02_clean.py {coin_flags()} {HOLDOUT_FLAG}".strip())
-    run(f"python pipeline/03_engineer.py {coin_flags()} {HOLDOUT_FLAG}".strip())
+    cf = coin_flags()
+    ho = HOLDOUT_FLAG.strip()
+    run(f"python pipeline/01_fetch.py {cf} {ho}".strip())
+    run(f"python pipeline/02_clean.py {cf} {ho}".strip())
+    run(f"python pipeline/03_engineer.py {cf} {ho}".strip())
+    run_audit()
 
 # %% [markdown]
 # ## 4. Train LGBM (5-class, purged CV)
