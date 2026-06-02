@@ -282,7 +282,7 @@ def compute_lgbm_labels_h4(
     """
     5-class ATR-normalized return label untuk LGBM (H4 timeframe).
 
-    future_return_atr = (close[t+horizon] / close[t] - 1) / ATR[t]
+    future_return_atr = (close[t+horizon] - close[t]) / ATR[t]
 
     Classes:
       -2: strong short (return < -strong_thr)
@@ -297,7 +297,7 @@ def compute_lgbm_labels_h4(
     """
     atr_safe = atr.replace(0, np.nan).ffill().fillna(close * 0.01)
 
-    future_ret_atr = (close.shift(-horizon) / close - 1.0) / atr_safe
+    future_ret_atr = (close.shift(-horizon) - close) / atr_safe
 
     label = pd.Series(0, index=close.index, dtype=np.int64)
     label[future_ret_atr >  strong_thr] =  2
