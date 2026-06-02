@@ -1,16 +1,13 @@
 # Cascade v5 — Colab dependencies
-# Colab pre-installs torch + CUDA; paket lain mungkin perlu update
+# torch + numpy sudah pre-installed di Colab runtime GPU — jangan di-pin ulang
+# karena compiled .so extensions akan conflict (ABI mismatch)
 
-# Deep learning (LSTM)
-torch>=2.0.0
-
-# Gradient boosting
+# Gradient boosting (LGBM CPU di Colab)
 lightgbm>=4.0.0
 
 # Data
-numpy>=1.24.0,<2.0.0
 pandas>=2.0.0
-pyarrow>=12.0.0
+pyarrow>=14.0.0
 
 # ML utils
 scikit-learn>=1.3.0
