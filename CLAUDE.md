@@ -493,7 +493,7 @@ python tools/benchmark_plan.py
 
 Target: FAIL=0 pada struktur/import/path; SKIP normal jika data belum di-fetch.
 
-## Google Colab
+## Google Colab / Jupyter
 
 Skrip Jupyter: `notebooks/cascade_v5_jupyter.py` · notebook: `Cascade_v5_Jupyter.ipynb` · panduan: `notebooks/README.md`
 
@@ -517,6 +517,66 @@ Output: `reports/overfitting_*.md` + `.json`. Template: `reports/TEMPLATE_overfi
 Sinyal: stabilitas CV, gap train/val, OOF vs in-sample log-loss, kalibrasi confidence, holdout WR vs proxy CV.
 Ambang di `config.py` (`OVERFIT_*`).
 
+## Known Issues (dari Audit Arsitektur 2026-06-02)
+
+| Severity | Komponen | Masalah |
+|---|---|---|
+| HIGH | `pipeline/05c_train_momentum_expert.py` | CV fold pakai `np.arange(len(X))` bukan timestamp — purge ordinal bukan temporal |
+| LOW | `pipeline/05d_oof_residuals.py` line 115 | Residual bar terakhir di-clip ke `len-1` → re-used untuk trailing sequences |
+
+## Fine-Tuning Agenda
+
+Parameter berikut **belum dikalibrasi dari data** — semua hardcode tanpa validasi holdout.
+Detail sweep dan metrik keberhasilan ada di EXPERIMENTS.md.
+
+### Prioritas 1 — Jalankan dulu, cek distribusi output model sebelum sweep apapun
+
+### Prioritas 2 — Fusion Weights (paling berpengaruh ke PnL)
+```python
+FUSION_LGBM_WEIGHT        = 0.55   # belum tahu bobot ideal vs kualitas LGBM di holdout
+FUSION_RESIDUAL_WEIGHT    = 0.35   # bergantung pada residual LSTM MSE
+FUSION_EXHAUSTION_PENALTY = 0.25   # mungkin terlalu agresif / terlalu lunak
+FUSION_MOMENTUM_BOOST_THR = 0.75   # belum ada distribusi momentum_strength aktual
+FUSION_MOMENTUM_BOOST_VAL = 0.05   # mungkin terlalu kecil untuk berdampak
+```
+
+### Prioritas 3 — Smart Entry Gate (trade count vs kualitas)
+```python
+ENTRY_FINAL_PROB_THR         = 0.68   # distribusi final_prob belum diketahui
+ENTRY_MOMENTUM_STR_THR       = 0.55   # distribusi momentum_strength belum diketahui
+ENTRY_EXHAUSTION_MAX         = 0.60   # berapa % bar yang exhaustion > 0.60?
+ENTRY_HIGH_CONV_MOMENTUM_THR = 0.85   # apakah realistis dicapai?
+```
+
+### Prioritas 4 — Exhaustion Rules (base rate belum divalidasi)
+```python
+EXHAUSTION_SWING_ATR_THR = 3.5   # target base rate 10-20% bar H4
+EXHAUSTION_VOL_DROP      = 0.7   # cocok untuk semua coin?
+EXHAUSTION_WICK_RATIO    = 0.5   # mungkin terlalu banyak false positives
+```
+
+### Prioritas 5 — Ablasi (on/off comparison)
+- `H1_CONFIRMATION_ENABLED` — apakah H1 gate meningkatkan WR minimal 2%?
+- `GUARDIAN_ENABLED` — apakah Guardian meningkatkan Sharpe tanpa mengurangi PnL > 10%?
+- `GUARDIAN_EXIT_THRESHOLD = 0.60` — sweep [0.55, 0.60, 0.65, 0.70]
+- `LSTM_SEQ_LEN = 24` — ablasi [16, 24, 32 bar H4]
+
+### Target Metrik Holdout (Mei 2025 – Apr 2026)
+| Metrik | Target |
+|---|---|
+| PnL | > 0 USD |
+| Win Rate | > 52% |
+| Sharpe | > 1.0 |
+| Max Drawdown | < 30% modal |
+| Trade Count | ≥ 150 total |
+| Residual LSTM MSE | < 0.50 |
+
 ## Experiments Log
 
-Lihat `EXPERIMENTS.md` untuk catatan hasil per run.
+Lihat EXPERIMENTS.md untuk catatan hasil per run dan detail sweep setiap kelompok.
+
+### Konvensi File
+
+- **Model:** overwrite file yang sudah ada di `models/` — jangan buat `model_v2`, `model_final2`, dst.
+- **Eksperimen:** tambahkan entry baru di EXPERIMENTS.md (satu file) — jangan buat file eksperimen terpisah
+- **Config:** perubahan parameter dicatat di EXPERIMENTS.md, bukan duplikasi config.py
