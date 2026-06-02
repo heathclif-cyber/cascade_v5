@@ -95,6 +95,21 @@ def load_all_coins() -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex]:
     return X_all, y_all, t_all
 
 
+def _pad_missing_classes(
+    X_tr: np.ndarray, y_tr: np.ndarray,
+    X_ref: np.ndarray, y_ref: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Append 1 sample per missing class agar LabelEncoder LGBM tidak crash."""
+    present = set(np.unique(y_tr).tolist())
+    for cls in range(LGBM_NUM_CLASSES):
+        if cls not in present:
+            idx = np.where(y_ref == cls)[0]
+            if len(idx):
+                X_tr = np.vstack([X_tr, X_ref[idx[:1]]])
+                y_tr = np.append(y_tr, cls)
+    return X_tr, y_tr
+
+
 def _fit_lgbm(params: dict, X_tr, y_tr, X_val, y_val) -> lgb.LGBMClassifier:
     model = lgb.LGBMClassifier(**params)
     try:
@@ -121,8 +136,12 @@ def train_fold(
     X_tr: np.ndarray, y_tr: np.ndarray,
     X_val: np.ndarray, y_val: np.ndarray,
     fold_idx: int,
+    X_ref: np.ndarray | None = None,
+    y_ref: np.ndarray | None = None,
 ) -> tuple[lgb.LGBMClassifier, float, float, float]:
     """Train satu fold, return model + val metrics + train F1 (overfit check)."""
+    if X_ref is not None and y_ref is not None:
+        X_tr, y_tr = _pad_missing_classes(X_tr, y_tr, X_ref, y_ref)
     model = _fit_lgbm(LGBM_PARAMS, X_tr, y_tr, X_val, y_val)
     y_pred_val = model.predict(X_val)
     y_prob_val = model.predict_proba(X_val)
@@ -160,7 +179,7 @@ def main():
         X_tr, X_val = X[tr_idx], X[val_idx]
         y_tr, y_val = y[tr_idx], y[val_idx]
 
-        model, f1, ll, f1_tr = train_fold(X_tr, y_tr, X_val, y_val, fold_idx)
+        model, f1, ll, f1_tr = train_fold(X_tr, y_tr, X_val, y_val, fold_idx, X, y)
         oof_proba[val_idx] = model.predict_proba(X_val)
 
         cv_results.append({
