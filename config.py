@@ -262,7 +262,7 @@ GUARDIAN_PURGE_GAP_BARS     = 24
 GUARDIAN_DYNAMIC_FEATURES = [
     "bars_held_norm", "current_pnl_pct", "current_pnl_atr",
     "max_favorable_pnl_pct", "drawdown_from_peak_pct",
-    "direction", "entry_price_ratio",
+    "direction", "atr_entry_pct",
     # v3.5: tambah exhaustion & momentum
     "exhaustion_score", "momentum_strength",
 ]

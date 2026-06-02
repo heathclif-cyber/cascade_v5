@@ -104,8 +104,6 @@ def _compute_guardian_dynamic(
                      if direction == 2
                      else (entry_price - current_price) / entry_price)
     dd_from_peak  = (mfe_pnl - current_pnl) / mfe_pnl if mfe_pnl > 0.001 else 0.0
-    entry_ratio   = entry_price / current_price if current_price > 0 else 1.0
-
     return np.array([
         bars_held / MAX_HOLDING_BARS,    # bars_held_norm
         current_pnl,                     # current_pnl_pct
@@ -113,7 +111,7 @@ def _compute_guardian_dynamic(
         mfe_pnl,                         # max_favorable_pnl_pct
         dd_from_peak,                    # drawdown_from_peak_pct
         1.0 if direction == 2 else 0.0,  # direction
-        entry_ratio,                     # entry_price_ratio
+        atr_pct,                         # atr_entry_pct (ATR/price saat entry, normalized)
         exhaustion,                      # exhaustion_score (v3.5)
         momentum,                        # momentum_strength (v3.5)
     ], dtype=np.float64)
