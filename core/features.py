@@ -392,6 +392,42 @@ def engineer_features_v5(
         h4["close"], h4["high"], h4["low"], atr_h4
     )
 
+    # ── ATR-normalized price level features (comparable lintas koin & periode) ──
+    _atr = atr_h4.replace(0, np.nan).ffill().fillna(h4["close"] * 0.01)
+    _c   = h4["close"]
+
+    # Candle geometry
+    h4["candle_range_atr"] = (h4["high"] - h4["low"]) / _atr
+    h4["candle_body_atr"]  = (h4["close"] - h4["open"]).abs() / _atr
+
+    # Previous Day/Week High-Low → jarak dari close dalam ATR
+    for col, new in [("PDH","dist_pdh_atr"), ("PDL","dist_pdl_atr"),
+                     ("PWH","dist_pwh_atr"), ("PWL","dist_pwl_atr")]:
+        if col in h4.columns:
+            h4[new] = (h4[col] - _c) / _atr
+
+    # Volume profile → jarak dari close dalam ATR
+    for col, new in [("POC","dist_poc_atr"), ("VAH","dist_vah_atr"),
+                     ("VAL","dist_val_atr")]:
+        if col in h4.columns:
+            h4[new] = (h4[col] - _c) / _atr
+
+    # EMA → jarak dari close dalam ATR (positif = close di atas EMA)
+    for col, new in [("ema_200_h1","dist_ema200_h1_atr"),
+                     ("ema_50_h4","dist_ema50_h4_atr"),
+                     ("ema_200_h4","dist_ema200_h4_atr")]:
+        if col in h4.columns:
+            h4[new] = (_c - h4[col]) / _atr
+
+    # Raw ATR normalized ke % harga (sudah ada atr_percent_h4, ini backup)
+    if "atr_14_h4" in h4.columns and "atr_percent_h4" not in h4.columns:
+        h4["atr_percent_h4"] = h4["atr_14_h4"] / _c
+
+    # Volume relative (z-score 20 bar) — comparable lintas koin
+    h4["vol_ratio_20"] = (
+        h4["volume"] / h4["volume"].rolling(20, min_periods=5).mean()
+    ).fillna(1.0)
+
     # ── LGBM label (5-class, forward-looking — hanya untuk training) ──────────
     h4["label_lgbm"] = compute_lgbm_labels_h4(h4["close"], atr_h4)
 

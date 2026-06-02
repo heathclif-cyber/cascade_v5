@@ -117,13 +117,19 @@ LGBM_FEATURE_COLS = [
     "trend_strength", "trend_accel_4h", "cvd_momentum_adv",
     "range_expansion_h4", "cvd_div_h4",
     "H4_structure_break_strength",       # BARU v5
-    # Price levels — ATR-normalized distances saja (bukan raw price)
+    # Price levels — ATR-normalized (jarak dari close dalam unit ATR)
     "dist_from_8h_high", "dist_swing_high", "dist_swing_low",
+    "dist_pdh_atr", "dist_pdl_atr", "dist_pwh_atr", "dist_pwl_atr",
+    "dist_poc_atr", "dist_vah_atr", "dist_val_atr",
+    # EMA distance — berapa ATR close di atas/bawah EMA
+    "dist_ema200_h1_atr", "dist_ema50_h4_atr", "dist_ema200_h4_atr",
+    # Candle geometry — normalized ke ATR
+    "candle_range_atr", "candle_body_atr",
     # Liquidity
     "Buy_Liq", "Sell_Liq",
     # OI & funding
     "open_interest", "funding_rate", "funding_price_div",
-    # ATR — normalized saja (raw atr_14 encode coin identity)
+    # ATR — normalized saja
     "atr_percent_h4", "atr_zscore_20d", "atr_percentile_h1",
     # Returns tabular
     "log_ret_20",
@@ -136,7 +142,7 @@ LGBM_FEATURE_COLS = [
     # Other tabular
     "vwdp_smooth", "relative_strength_z", "whale_retail_divergence",
     "relative_strength_momentum", "vol_spike_zscore", "spread_to_volume",
-    "vol_efficiency", "buy_volume", "volume",
+    "vol_efficiency", "vol_ratio_20",
 ]
 
 # ─── LSTM Sequence Expert (H4 PRIMARY) ───────────────────────────────────────
