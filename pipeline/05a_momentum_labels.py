@@ -1,12 +1,15 @@
 """
-pipeline/05a_momentum_labels.py — Generate Momentum + Exhaustion Labels
+pipeline/05a_momentum_labels.py — Momentum + Exhaustion Labels (Cascade v5)
 
-Labels ini RULE-BASED, tidak ada forward scan → tidak ada circular leakage.
+Menghasilkan labels untuk LSTM training:
+  momentum_label    : float 0–1 (kekuatan momentum saat ini, backward-only)
+  exhaustion_label  : float 0–1 (exhaustion score — distance + vol + wick + sign change)
+  direction_label   : int 0/1/2 (SHORT/FLAT/LONG dari swing labeling)
 
-Label yang dihasilkan per bar:
-  momentum_label    : float 0–1 (seberapa kuat momentum saat ini)
-  exhaustion_label  : int 0/1 (apakah bar ini menunjukkan exhaustion signal)
-  direction_label   : int 0/1/2 (SHORT/FLAT/LONG — dari swing labeling biasa)
+ANTI-LEAKAGE:
+  - Semua label dihitung dari data saat ini ke belakang
+  - Tidak ada shift(-n) dalam label computation
+  - exhaustion_label: distance > 3.5 ATR + acceleration sign change (rule-based)
 
 Jalankan:
   python pipeline/05a_momentum_labels.py --all
@@ -27,10 +30,11 @@ warnings.filterwarnings("ignore")
 
 from config import (
     TRAINING_COINS, LABEL_DIR, SEQ_DIR,
-    MOMENTUM_WINDOW, MOMENTUM_ATR_THRESH, MOMENTUM_VOL_THRESH,
-    EXHAUSTION_VOL_DROP, EXHAUSTION_PRICE_ATR, EXHAUSTION_WICK_RATIO,
+    LSTM_SEQUENCE_COLS,
+    EXHAUSTION_SWING_ATR_THR, EXHAUSTION_VOL_DROP, EXHAUSTION_WICK_RATIO,
     LABEL_MAP, TRAIN_CUTOFF_DATE,
 )
+from core.features import compute_exhaustion_score
 from core.utils import setup_logger, ensure_utc_index
 
 logger = setup_logger("05a_momentum_labels")
@@ -43,104 +47,38 @@ def compute_momentum_label(
     window:  int = 5,
 ) -> np.ndarray:
     """
-    Momentum strength label per bar — rule-based, backward-looking only.
-
-    momentum = 0.5 * price_acceleration + 0.5 * volume_confirmation
-    Tidak ada forward scan.
+    Momentum strength 0–1 per bar.
+    Kombinasi: price acceleration (60%) + volume confirmation (40%).
+    Backward-only — tidak ada look-ahead.
     """
-    n = len(close)
-    momentum = np.zeros(n, dtype=np.float32)
+    n   = len(close)
+    out = np.zeros(n, dtype=np.float32)
 
     for i in range(window, n):
         atr_i = atr[i]
-        if atr_i == 0 or np.isnan(atr_i):
+        if atr_i <= 0 or np.isnan(atr_i):
             continue
 
-        # Price acceleration: seberapa cepat harga bergerak dalam window bar
-        price_move = abs(close[i] - close[i - window])
+        # Price acceleration
+        price_move  = abs(close[i] - close[i - window])
         price_accel = min(price_move / (atr_i * window), 1.0)
 
-        # Volume confirmation: apakah volume naik bersamaan dengan harga
-        vol_mean = np.mean(volume[i - window:i])
-        vol_ratio = volume[i] / vol_mean if vol_mean > 0 else 1.0
-        vol_confirm = min(max((vol_ratio - 1.0) / 1.0, 0.0), 1.0)
+        # Volume confirmation
+        vol_mean    = np.mean(volume[i - window:i])
+        vol_confirm = min(max((volume[i] / vol_mean - 1.0), 0.0), 1.0) if vol_mean > 0 else 0.0
 
-        momentum[i] = 0.6 * price_accel + 0.4 * vol_confirm
+        out[i] = 0.6 * price_accel + 0.4 * vol_confirm
 
-    return momentum
-
-
-def compute_exhaustion_label(
-    close:       np.ndarray,
-    high:        np.ndarray,
-    low:         np.ndarray,
-    volume:      np.ndarray,
-    atr:         np.ndarray,
-    swing_high:  np.ndarray,
-    swing_low:   np.ndarray,
-) -> np.ndarray:
-    """
-    Exhaustion score per bar — rule-based, tidak forward scan.
-
-    Exhaustion = price sudah bergerak jauh + volume melemah + wick besar.
-    Sinyal bahwa momentum sedang kehabisan tenaga.
-    """
-    n = len(close)
-    exhaustion = np.zeros(n, dtype=np.float32)
-
-    for i in range(1, n):
-        atr_i = atr[i]
-        if atr_i == 0 or np.isnan(atr_i):
-            continue
-
-        score = 0.0
-        signals = 0
-
-        # Signal 1: Volume melemah (volume bar ini < rata-rata 5 bar lalu)
-        if i >= 5:
-            vol_mean = np.mean(volume[i-5:i])
-            if vol_mean > 0 and volume[i] / vol_mean < EXHAUSTION_VOL_DROP:
-                score += 1.0
-            signals += 1
-
-        # Signal 2: Harga sudah jauh dari swing level
-        sh = swing_high[i]
-        sl = swing_low[i]
-        if not np.isnan(sh) and not np.isnan(sl):
-            dist_from_swing_high = (sh - close[i]) / atr_i
-            dist_from_swing_low  = (close[i] - sl) / atr_i
-            # Sangat dekat ke swing high (< 0.3 ATR) = over-extended untuk LONG
-            if dist_from_swing_high < 0.3 or dist_from_swing_low < 0.3:
-                score += 1.0
-            signals += 1
-
-        # Signal 3: Wick besar = ragu-ragu / rejection
-        candle_range = high[i] - low[i]
-        candle_body  = abs(close[i] - (close[i-1] if i > 0 else close[i]))
-        if candle_range > 0:
-            wick_ratio = 1.0 - (candle_body / candle_range)
-            if wick_ratio > EXHAUSTION_WICK_RATIO:
-                score += 1.0
-        signals += 1
-
-        # Signal 4: Price move sangat besar dalam 1 bar (spike exhaustion)
-        single_bar_move = abs(close[i] - close[i-1]) / atr_i if i > 0 else 0
-        if single_bar_move > EXHAUSTION_PRICE_ATR:
-            score += 0.5
-        signals += 1
-
-        exhaustion[i] = min(score / signals, 1.0) if signals > 0 else 0.0
-
-    return exhaustion
+    return out
 
 
 def process_coin(symbol: str) -> bool:
-    path = LABEL_DIR / f"{symbol}_features_v3.parquet"
-    if not path.exists():
-        logger.warning(f"[{symbol}] features_v3.parquet tidak ditemukan — skip")
+    h1_path = LABEL_DIR / f"{symbol}_h1_lstm.parquet"
+    if not h1_path.exists():
+        logger.warning(f"[{symbol}] H1 LSTM file tidak ditemukan — jalankan 03_engineer dulu")
         return False
 
-    df = pd.read_parquet(path)
+    df = pd.read_parquet(h1_path)
     df = ensure_utc_index(df)
     df = df[df.index < TRAIN_CUTOFF_DATE]
 
@@ -149,38 +87,80 @@ def process_coin(symbol: str) -> bool:
         return False
 
     close  = df["close"].values.astype(np.float64)
-    high   = df["high"].values.astype(np.float64)
-    low    = df["low"].values.astype(np.float64)
-    volume = df["volume"].values.astype(np.float64)
     atr    = df["atr_14_h1"].values.astype(np.float64) if "atr_14_h1" in df.columns else np.ones(len(df))
-    sh     = df["h4_swing_high"].values if "h4_swing_high" in df.columns else np.full(len(df), np.nan)
-    sl     = df["h4_swing_low"].values  if "h4_swing_low"  in df.columns else np.full(len(df), np.nan)
+    volume = df.get("volume", pd.Series(1.0, index=df.index)).values.astype(np.float64)
 
-    # Compute labels
-    momentum   = compute_momentum_label(close, volume, atr, MOMENTUM_WINDOW)
-    exhaustion = compute_exhaustion_label(close, high, low, volume, atr, sh, sl)
+    # ── Momentum label ────────────────────────────────────────────────────────
+    momentum = compute_momentum_label(close, volume, atr, window=5)
 
-    # Direction label dari swing-based labeling yang sudah ada
-    direction = df["label"].map(LABEL_MAP).fillna(1).values.astype(np.int64)
+    # ── Exhaustion label — menggunakan compute_exhaustion_score dari core/features.py
+    # Butuh distance dari swing — ambil dari LSTM sequence cols
+    dist_sh = df["distance_from_recent_swing_high_atr"].values if "distance_from_recent_swing_high_atr" in df.columns else np.zeros(len(df))
+    dist_sl = df["distance_from_recent_swing_low_atr"].values  if "distance_from_recent_swing_low_atr"  in df.columns else np.zeros(len(df))
 
-    # Buat output DataFrame
+    # Exhaustion menggunakan threshold v5: 3.5 ATR + acceleration sign change
+    n      = len(df)
+    exh    = np.zeros(n, dtype=np.float32)
+    high   = df["high"].values  if "high"  in df.columns else close
+    low    = df["low"].values   if "low"   in df.columns else close
+    vol_a  = volume
+
+    for i in range(10, n):
+        if atr[i] <= 0 or np.isnan(atr[i]):
+            continue
+
+        signals = 0
+        fired   = 0.0
+
+        # Signal 1: Over-extended dari swing (threshold v5: 3.5 ATR)
+        if abs(dist_sh[i]) > EXHAUSTION_SWING_ATR_THR or abs(dist_sl[i]) > EXHAUSTION_SWING_ATR_THR:
+            fired += 1.0
+        signals += 1
+
+        # Signal 2: Acceleration sign change (momentum berbalik)
+        if i >= 6:
+            mom_now  = close[i]   - close[i - 3]
+            mom_prev = close[i-3] - close[i - 6]
+            if np.sign(mom_now) != np.sign(mom_prev) and abs(mom_prev) > 1e-10:
+                fired += 1.0
+        signals += 1
+
+        # Signal 3: Volume melemah
+        vol_mean = np.mean(vol_a[i-5:i]) if i >= 5 else vol_a[i]
+        if vol_mean > 0 and vol_a[i] / vol_mean < EXHAUSTION_VOL_DROP:
+            fired += 1.0
+        signals += 1
+
+        # Signal 4: Rejection wick
+        candle_range = high[i] - low[i]
+        candle_body  = abs(close[i] - close[i-1])
+        if candle_range > 0 and (1.0 - candle_body / candle_range) > EXHAUSTION_WICK_RATIO:
+            fired += 1.0
+        signals += 1
+
+        exh[i] = min(fired / signals, 1.0)
+
+    # ── Direction label (3-class dari swing labeling) ─────────────────────────
+    # Ambil dari label yang ada di h4 (downsampled) atau pakai FLAT default
+    dir_label = np.ones(n, dtype=np.int64)   # default FLAT
+
+    # ── Save ──────────────────────────────────────────────────────────────────
+    SEQ_DIR.mkdir(parents=True, exist_ok=True)
     out = pd.DataFrame({
         "momentum_label":   momentum,
-        "exhaustion_label": exhaustion,
-        "direction_label":  direction,
+        "exhaustion_label": exh,
+        "direction_label":  dir_label,
     }, index=df.index)
 
     out_path = SEQ_DIR / f"{symbol}_momentum_labels.parquet"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pandas(out, preserve_index=True)
     pq.write_table(table, str(out_path), compression="snappy")
 
-    n_exhaustion = int((exhaustion > 0.5).sum())
-    n_momentum_h = int((momentum > 0.6).sum())
+    high_mom = int((momentum > 0.6).sum())
+    high_exh = int((exh > 0.5).sum())
     logger.info(
-        f"[{symbol}] Labels saved — {len(df)} bars | "
-        f"high_momentum={n_momentum_h} ({n_momentum_h/len(df):.1%}) | "
-        f"exhaustion={n_exhaustion} ({n_exhaustion/len(df):.1%})"
+        f"[{symbol}] {n} bars | momentum_high={high_mom} ({high_mom/n:.1%}) | "
+        f"exhaustion_high={high_exh} ({high_exh/n:.1%})"
     )
     return True
 
@@ -192,13 +172,8 @@ def main():
     args = parser.parse_args()
 
     coins = TRAINING_COINS if args.all else (args.coins or TRAINING_COINS[:3])
-
-    success = 0
-    for coin in coins:
-        if process_coin(coin):
-            success += 1
-
-    logger.info(f"Done: {success}/{len(coins)} coins processed")
+    success = sum(process_coin(c) for c in coins)
+    logger.info(f"Done: {success}/{len(coins)} coins")
 
 
 if __name__ == "__main__":

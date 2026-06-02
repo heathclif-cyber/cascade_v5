@@ -1,5 +1,6 @@
 """
 config.py — Cascade v5: Exhaustion-Aware Residual Momentum Hybrid
+H4 Primary + Attention LSTM + Dynamic Fusion + Guardian v3.5
 Semua parameter terpusat. Edit di sini, jangan duplikasi.
 """
 
@@ -7,13 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
-ROOT_DIR  = Path(__file__).parent
-DATA_DIR  = ROOT_DIR / "data"
-RAW_DIR   = DATA_DIR / "raw"
-PROC_DIR  = DATA_DIR / "processed"
-LABEL_DIR = DATA_DIR / "labeled"
-SEQ_DIR   = DATA_DIR / "sequences"
-MODEL_DIR = ROOT_DIR / "models"
+ROOT_DIR   = Path(__file__).parent
+DATA_DIR   = ROOT_DIR / "data"
+RAW_DIR    = DATA_DIR / "raw"
+PROC_DIR   = DATA_DIR / "processed"
+LABEL_DIR  = DATA_DIR / "labeled"
+SEQ_DIR    = DATA_DIR / "sequences"
+MODEL_DIR  = ROOT_DIR / "models"
 REPORT_DIR = ROOT_DIR / "reports"
 
 # ─── Koin ─────────────────────────────────────────────────────────────────────
@@ -27,8 +28,8 @@ ALL_COINS  = TRAINING_COINS
 SYMBOL_MAP = {coin: i for i, coin in enumerate(ALL_COINS)}
 
 # ─── Periode ──────────────────────────────────────────────────────────────────
-TRAIN_START      = datetime(2020, 1, 1, tzinfo=timezone.utc)
-TRAIN_END        = datetime(2026, 4, 1, tzinfo=timezone.utc)
+TRAIN_START       = datetime(2020, 1, 1, tzinfo=timezone.utc)
+TRAIN_END         = datetime(2026, 4, 1, tzinfo=timezone.utc)
 TRAIN_CUTOFF_DATE = datetime(2025, 5, 1, tzinfo=timezone.utc)  # holdout = setelah ini
 
 # ─── Binance ──────────────────────────────────────────────────────────────────
@@ -42,13 +43,13 @@ FUNDING_LIMIT          = 1000
 KLINE_INTERVALS        = ["1h", "4h"]
 
 # ─── Simulasi Trading ─────────────────────────────────────────────────────────
-MODAL_PER_TRADE  = 5.0          # USD per trade — MUTLAK, jangan diubah
-LEVERAGE_SIM     = [5.0]
-FEE_PER_SIDE     = 0.0004
+MODAL_PER_TRADE   = 5.0           # USD per trade — MUTLAK, jangan diubah
+LEVERAGE_SIM      = [5.0]
+FEE_PER_SIDE      = 0.0004
 SLIPPAGE_PER_SIDE = 0.0005
-MAX_HOLDING_BARS = 24           # bar H1 = 24 jam
+MAX_HOLDING_BARS  = 24            # bar H1 = 24 jam
 
-# ─── TP/SL Hybrid ─────────────────────────────────────────────────────────────
+# ─── TP/SL Hybrid (H4 Swing + ATR fallback) ──────────────────────────────────
 SWING_LABEL_MIN_RR   = 0.5
 SWING_LABEL_MIN_TP   = 1.2
 SWING_LABEL_MAX_SL   = 4.0
@@ -57,18 +58,41 @@ TP_SL_FALLBACK_TP    = 2.0
 TP_SL_FALLBACK_SL    = 1.5
 SWING_BUMPER_ATR     = 0.5
 
-# ─── Feature Split ────────────────────────────────────────────────────────────
-# LGBM Tabular Expert — 60 fitur struktur + regime + value
+# ─── Swing Calculation ────────────────────────────────────────────────────────
+# Hanya backward-looking — tidak ada look-ahead leakage
+SWING_LEFT_BARS  = 5   # berapa bar ke kiri untuk deteksi swing pivot
+# TIDAK ADA right bars — kita pakai rolling max/min ke belakang saja
+
+# ─── Label Classes ────────────────────────────────────────────────────────────
+# LGBM 5-class: -2=strong short, -1=weak short, 0=flat, 1=weak long, 2=strong long
+LGBM_NUM_CLASSES   = 5
+LGBM_LABEL_MAP     = {-2: 0, -1: 1, 0: 2, 1: 3, 2: 4}   # map ke index 0-4
+LGBM_LABEL_MAP_INV = {v: k for k, v in LGBM_LABEL_MAP.items()}
+
+# ATR-return thresholds untuk 5-class label (pada H4, horizon 18 bar)
+LGBM_LABEL_HORIZON  = 18          # bar H4 ke depan untuk hitung return (~3 hari)
+LGBM_STRONG_THR     = 2.5         # |return/ATR| > 2.5 = strong
+LGBM_WEAK_THR       = 1.0         # |return/ATR| > 1.0 = weak
+
+# Label lama (3-class) — dipakai di Guardian dan TP/SL simulation
+LABEL_MAP     = {"SHORT": 0, "FLAT": 1, "LONG": 2}
+LABEL_MAP_INV = {v: k for k, v in LABEL_MAP.items()}
+NUM_CLASSES   = 3
+
+# ─── LGBM Tabular Expert ──────────────────────────────────────────────────────
+# ~60 fitur — struktur pasar, regime, macro, levels
 # Berdasarkan feature_separation analysis: lgbm_importance tinggi, tempvar boleh rendah
 LGBM_FEATURE_COLS = [
-    # Liquidation levels (top importance)
+    # Liquidation levels (top importance dari audit v4)
     "dist_liq_50x_long", "dist_liq_50x_short",
     "dist_liq_20x_long", "dist_liq_20x_short",
     # Macro
     "fear_greed", "btc_dominance",
-    # H4 structure
+    # H4 structure & regime
     "atr_percent_h4", "cvd_slope_h4", "ofi_h4_delta",
     "trend_strength", "trend_accel_4h", "cvd_momentum_adv",
+    "range_expansion_h4", "cvd_div_h4",
+    "H4_structure_break_strength",       # BARU v5
     # Price levels
     "dist_from_8h_high", "dist_swing_high", "dist_swing_low",
     "PDH", "PDL", "PWH", "PWL",
@@ -76,79 +100,65 @@ LGBM_FEATURE_COLS = [
     "POC", "VAH", "VAL",
     # Liquidity
     "Buy_Liq", "Sell_Liq",
-    # Open interest & funding
-    "open_interest", "funding_rate",
+    # OI & funding
+    "open_interest", "funding_rate", "funding_price_div",
     # ATR
     "atr_14_h1", "atr_14_h4", "atr_zscore_20d", "atr_percentile_h1",
-    # EMA H1 (slow)
-    "ema_200_h1",
-    # Momentum tabular
-    "log_ret_20", "cvd",
-    # Time (tabular context)
+    # EMA slow (snapshot — cocok LGBM)
+    "ema_200_h1", "ema_50_h4", "ema_200_h4",
+    # Returns tabular
+    "log_ret_20",
+    # CVD tabular
+    "cvd",
+    # Time
     "dow_sin", "dow_cos",
     # Structure tabular
     "bars_since_BOS", "absorption_at_swing",
-    # Other
+    # Other tabular
     "vwdp_smooth", "relative_strength_z", "whale_retail_divergence",
-    "funding_price_div", "relative_strength_momentum",
-    "vol_spike_zscore", "spread_to_volume", "vol_efficiency",
-    "buy_volume", "volume",
-    # OHLC (tabular snapshot)
+    "relative_strength_momentum", "vol_spike_zscore", "spread_to_volume",
+    "vol_efficiency", "buy_volume", "volume",
+    # OHLC (snapshot)
     "open", "high", "low", "close",
-    # Regime soft features
-    "range_expansion_h4", "cvd_div_h4",
 ]
 
-# LSTM Sequence Expert — 20 fitur trajectory (temporal variance tinggi)
-# Berdasarkan feature_separation: tempvar > 0.30, berubah setiap H1 bar
+# ─── LSTM Sequence Expert ─────────────────────────────────────────────────────
+# 10 trajectory features — semuanya berbasis H4 sequence atau H1 fast features
+# Berubah signifikan dalam window 32 bar → LSTM bisa belajar pola temporal
 LSTM_SEQUENCE_COLS = [
-    "time_to_funding_norm",  # 1.016 — berubah tiap jam
-    "swing_momentum",        # 0.962
-    "ofi_z_score",           # 0.952
-    "absorption_z",          # 0.956
-    "effort_vs_result",      # 0.951
-    "rsi_slope_h4",          # 0.918
-    "log_ret_1",             # 0.917
-    "rsi_6",                 # 0.909
-    "stochrsi_k",            # 0.938
-    "stochrsi_d",            # 0.929
-    "vol_ratio_20",          # 0.902
-    "vol_regime",            # 0.881
-    "ema_7_h1",              # 0.887
-    "dist_from_8h_high",     # 0.885 (shared)
-    "log_ret_5",             # 0.832
-    "ofi_acceleration",      # 0.353
-    "volume_delta",          # 0.319
-    "h4_trend",              # 0.606
-    "dist_swing_low",        # 0.672
-    "log_ret_20",            # 0.622 (shared)
+    "distance_from_recent_swing_high_atr",  # seberapa jauh dari swing high (ATR units)
+    "distance_from_recent_swing_low_atr",   # seberapa jauh dari swing low (ATR units)
+    "run_length_up_bars",                   # berapa bar berturut-turut naik
+    "acceleration_sign_change",             # apakah momentum baru berbalik arah
+    "log_return_acceleration_5",            # percepatan return dalam 5 bar
+    "momentum_delta_5",                     # perubahan momentum 5 bar
+    "funding_extreme_zscore",               # funding rate extreme (z-score)
+    "price_funding_divergence",             # divergence harga vs funding rate
+    "volume_acceleration",                  # percepatan volume (apakah volume naik/turun)
+    "candle_body_size_acceleration",        # percepatan ukuran body candle
 ]
 
-# Features buang — zero importance dan zero temporal variance
-DROP_FEATURES = ["FVG_up", "FVG_down", "dynamic_position_pressure",
-                 "hidden_divergence", "sell_volume"]
+# Features yang di-DROP dari v4 (zero importance + zero temporal variance)
+DROP_FEATURES = [
+    "FVG_up", "FVG_down", "dynamic_position_pressure",
+    "hidden_divergence", "sell_volume",
+]
 
-# ─── Label Settings ───────────────────────────────────────────────────────────
-LABEL_MAP     = {"SHORT": 0, "FLAT": 1, "LONG": 2}
-LABEL_MAP_INV = {v: k for k, v in LABEL_MAP.items()}
-NUM_CLASSES   = 3
+# ─── Exhaustion Detection ─────────────────────────────────────────────────────
+EXHAUSTION_SWING_ATR_THR  = 3.5   # distance > 3.5 ATR dari swing = over-extended
+EXHAUSTION_ACCEL_SIGN_CHG = True  # harus ada acceleration sign change bersamaan
+EXHAUSTION_VOL_DROP       = 0.7   # volume ratio < 0.7 = konfirmasi volume melemah
+EXHAUSTION_WICK_RATIO     = 0.5   # wick > 50% = rejection candle
 
-# Momentum label (05a) — rule-based, tidak forward scan
-MOMENTUM_WINDOW     = 5    # bar H1 untuk hitung acceleration
-MOMENTUM_ATR_THRESH = 1.5  # price move >= 1.5x ATR = high momentum
-MOMENTUM_VOL_THRESH = 1.3  # volume ratio >= 1.3x = volume confirm
-N_FORWARD_BARS      = 12   # horizon label momentum (N bar ke depan)
-MIN_MOVE_ATR        = 0.4  # minimum move untuk label valid
+# ─── Training & CV ────────────────────────────────────────────────────────────
+N_FOLDS          = 8
+PURGE_GAP_BARS   = 24   # 24 H1 bars = 1 hari (lebih konservatif dari v4)
+PURGE_GAP_H4     = 6    # 6 H4 bars = 1 hari (untuk model H4)
 
-# Exhaustion label (rule-based, tidak forward scan)
-EXHAUSTION_VOL_DROP   = 0.7   # volume ratio < 0.7 = volume melemah
-EXHAUSTION_PRICE_ATR  = 2.0   # harga sudah bergerak > 2x ATR dari swing
-EXHAUSTION_WICK_RATIO = 0.5   # wick > 50% candle body = exhaustion signal
-
-# ─── LGBM Tabular Expert ──────────────────────────────────────────────────────
+# ─── LGBM Params ──────────────────────────────────────────────────────────────
 LGBM_PARAMS = {
     "objective":         "multiclass",
-    "num_class":         3,
+    "num_class":         LGBM_NUM_CLASSES,
     "n_estimators":      1000,
     "learning_rate":     0.05,
     "max_depth":         6,
@@ -163,69 +173,60 @@ LGBM_PARAMS = {
     "gpu_platform_id":   0,
     "gpu_device_id":     0,
 }
-LGBM_EARLY_STOPPING  = 50
-LGBM_THRESHOLD_LONG  = 0.65
-LGBM_THRESHOLD_SHORT = 0.65
+LGBM_EARLY_STOPPING = 50
 
-# ─── LSTM Momentum + Exhaustion Expert ────────────────────────────────────────
-LSTM_SEQ_LEN     = 32    # 32 bar H1 = 32 jam history
-LSTM_HIDDEN      = 128
-LSTM_LAYERS      = 2
-LSTM_DROPOUT     = 0.3
-LSTM_EPOCHS      = 100
-LSTM_PATIENCE    = 15
-LSTM_BATCH_SIZE  = 512
-LSTM_LR          = 0.001
+# Entry thresholds — mapped dari 5-class ke long/short probability
+# class 3 (weak long) + class 4 (strong long) = long signal
+# class 0 (strong short) + class 1 (weak short) = short signal
+LGBM_LONG_CLASSES  = [3, 4]   # index 3=weak long, 4=strong long
+LGBM_SHORT_CLASSES = [0, 1]   # index 0=strong short, 1=weak short
+LGBM_THRESHOLD_LONG  = 0.50   # threshold combined p(weak long) + p(strong long)
+LGBM_THRESHOLD_SHORT = 0.50
+
+# ─── LSTM / AttentionLSTM ─────────────────────────────────────────────────────
+LSTM_SEQ_LEN      = 32    # 32 bar H1 = 32 jam sequence
+LSTM_HIDDEN       = 128
+LSTM_LAYERS       = 2
+LSTM_DROPOUT      = 0.3
+LSTM_EPOCHS       = 100
+LSTM_PATIENCE     = 15
+LSTM_BATCH_SIZE   = 512
+LSTM_LR           = 0.001
 LSTM_WEIGHT_DECAY = 1e-4
 
-# Output heads LSTM
-LSTM_OUTPUT_MOMENTUM_STRENGTH  = True   # head 1: seberapa kuat momentum
-LSTM_OUTPUT_EXHAUSTION_SCORE   = True   # head 2: seberapa dekat exhaustion
-LSTM_OUTPUT_RESIDUAL_CORRECTION = True  # head 3: koreksi error LGBM (OOF residual)
-
 # ─── Dynamic Fusion Layer ─────────────────────────────────────────────────────
-# Weights akan di-learn via meta-learner (logistic regression pada OOF predictions)
-# Nilai awal untuk eksperimen pertama:
-FUSION_LGBM_WEIGHT        = 0.55
-FUSION_RESIDUAL_WEIGHT    = 0.35
-FUSION_EXHAUSTION_PENALTY = 0.25
-FUSION_MOMENTUM_BOOST_THR = 0.75   # momentum_strength > ini → beri boost
-FUSION_MOMENTUM_BOOST_VAL = 0.05   # besar boost
+FUSION_LGBM_WEIGHT          = 0.55
+FUSION_RESIDUAL_WEIGHT      = 0.35
+FUSION_EXHAUSTION_PENALTY   = 0.25
+FUSION_MOMENTUM_BOOST_THR   = 0.75
+FUSION_MOMENTUM_BOOST_VAL   = 0.05
 
 # ─── Smart Entry Gate ─────────────────────────────────────────────────────────
-ENTRY_FINAL_PROB_THR        = 0.68  # threshold normal
-ENTRY_MOMENTUM_STR_THR      = 0.55  # momentum_strength minimum
-ENTRY_EXHAUSTION_MAX         = 0.60  # reject jika exhaustion > ini
-ENTRY_HIGH_CONV_MOMENTUM_THR = 0.85  # high-conviction path: momentum threshold
-ENTRY_HIGH_CONV_PROB_THR     = 0.60  # high-conviction path: prob threshold (lebih rendah)
-
-# ─── Training & CV ────────────────────────────────────────────────────────────
-N_FOLDS        = 8
-PURGE_GAP_BARS = 24   # lebih konservatif dari v4 (24 bars = 1 hari)
+ENTRY_FINAL_PROB_THR         = 0.68
+ENTRY_MOMENTUM_STR_THR       = 0.55
+ENTRY_EXHAUSTION_MAX         = 0.60
+ENTRY_HIGH_CONV_MOMENTUM_THR = 0.85
+ENTRY_HIGH_CONV_PROB_THR     = 0.60
 
 # ─── Guardian v3.5 ────────────────────────────────────────────────────────────
-GUARDIAN_ENABLED             = True
-GUARDIAN_EXIT_THRESHOLD      = 0.60
-GUARDIAN_MIN_HOLD_BARS       = 3
-GUARDIAN_ACTIVATION_ATR      = 1.0
-GUARDIAN_PARTIAL_EXIT_RATIO  = 0.50
-GUARDIAN_EARLY_STOPPING      = 50
-GUARDIAN_N_FOLDS             = 8
-GUARDIAN_PURGE_GAP_BARS      = 24
+GUARDIAN_ENABLED            = True
+GUARDIAN_EXIT_THRESHOLD     = 0.60
+GUARDIAN_MIN_HOLD_BARS      = 3
+GUARDIAN_ACTIVATION_ATR     = 1.0
+GUARDIAN_PARTIAL_EXIT_RATIO = 0.50
+GUARDIAN_EARLY_STOPPING     = 50
+GUARDIAN_N_FOLDS            = 8
+GUARDIAN_PURGE_GAP_BARS     = 24
 
-# Guardian dynamic features (tetap sama dengan v3)
 GUARDIAN_DYNAMIC_FEATURES = [
     "bars_held_norm", "current_pnl_pct", "current_pnl_atr",
     "max_favorable_pnl_pct", "drawdown_from_peak_pct",
     "direction", "entry_price_ratio",
-]
-# Guardian v3.5: tambah exhaustion & momentum dari Expert
-GUARDIAN_EXTRA_FEATURES = [
-    "exhaustion_score",     # dari Momentum Expert
-    "momentum_strength",    # dari Momentum Expert
+    # v3.5: tambah exhaustion & momentum
+    "exhaustion_score", "momentum_strength",
 ]
 
-# ─── Trailing Stop (non-ML) ───────────────────────────────────────────────────
-TRAILING_STOP_ENABLED   = False
-TRAILING_STOP_ATR       = 2.0
-TRAILING_STOP_MIN_BARS  = 2
+# ─── Trailing Stop ────────────────────────────────────────────────────────────
+TRAILING_STOP_ENABLED  = False
+TRAILING_STOP_ATR      = 2.0
+TRAILING_STOP_MIN_BARS = 2
