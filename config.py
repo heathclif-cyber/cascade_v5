@@ -117,19 +117,14 @@ LGBM_FEATURE_COLS = [
     "trend_strength", "trend_accel_4h", "cvd_momentum_adv",
     "range_expansion_h4", "cvd_div_h4",
     "H4_structure_break_strength",       # BARU v5
-    # Price levels
+    # Price levels — ATR-normalized distances saja (bukan raw price)
     "dist_from_8h_high", "dist_swing_high", "dist_swing_low",
-    "PDH", "PDL", "PWH", "PWL",
-    # Volume profile
-    "POC", "VAH", "VAL",
     # Liquidity
     "Buy_Liq", "Sell_Liq",
     # OI & funding
     "open_interest", "funding_rate", "funding_price_div",
-    # ATR
-    "atr_14_h1", "atr_14_h4", "atr_zscore_20d", "atr_percentile_h1",
-    # EMA slow (snapshot — cocok LGBM)
-    "ema_200_h1", "ema_50_h4", "ema_200_h4",
+    # ATR — normalized saja (raw atr_14 encode coin identity)
+    "atr_percent_h4", "atr_zscore_20d", "atr_percentile_h1",
     # Returns tabular
     "log_ret_20",
     # CVD tabular
@@ -142,8 +137,6 @@ LGBM_FEATURE_COLS = [
     "vwdp_smooth", "relative_strength_z", "whale_retail_divergence",
     "relative_strength_momentum", "vol_spike_zscore", "spread_to_volume",
     "vol_efficiency", "buy_volume", "volume",
-    # OHLC (snapshot)
-    "open", "high", "low", "close",
 ]
 
 # ─── LSTM Sequence Expert (H4 PRIMARY) ───────────────────────────────────────
