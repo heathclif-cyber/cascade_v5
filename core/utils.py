@@ -54,9 +54,13 @@ class _FlushHandler(logging.StreamHandler):
 
 
 def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
+    import os
     logger = logging.getLogger(name)
+    if os.environ.get("CASCADE_JUPYTER", "").lower() in ("1", "true", "yes"):
+        logger.setLevel(level)
+        logger.propagate = True
+        return logger
     if not logger.handlers:
-        # stdout (bukan stderr) agar Jupyter tampilkan real-time dengan -u
         handler = _FlushHandler(sys.stdout)
         handler.setFormatter(logging.Formatter(
             "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",

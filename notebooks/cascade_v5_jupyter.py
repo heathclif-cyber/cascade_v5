@@ -16,6 +16,9 @@
 #
 # **Colab:** Runtime → **GPU** → jalankan **semua sel dari atas** (jangan loncat).
 #
+# Log pipeline tampil langsung di cell (bukan subprocess sunyi).
+# Tabel **STATUS DATA** muncul setelah fetch/clean/engineer.
+#
 # **MODAL_PER_TRADE = 5.0 USD** (jangan diubah)
 
 # %% [markdown]
@@ -124,11 +127,25 @@ print("MODAL_PER_TRADE:", MODAL_PER_TRADE)
 print("Coins:", PILOT_COINS if USE_PILOT else f"ALL ({len(TRAINING_COINS)})")
 
 # %% [markdown]
-# ## 2. Helper — jalankan perintah pipeline
+# ## 2. Helper + status (log informatif di Jupyter)
 
 # %%
+from tools.jupyter_ui import (
+    enable_verbose_logging,
+    status_table,
+    step_start,
+    step_ok,
+    step_fail,
+)
+
+enable_verbose_logging()
+os.environ["CASCADE_JUPYTER"] = "1"
+ACTIVE_COINS = PILOT_COINS if USE_PILOT else TRAINING_COINS
+status_table(ACTIVE_COINS, ROOT)
+
+
 def run_inprocess(rel_path: str, *argv: str) -> None:
-    """Jalankan skrip pipeline di kernel yang sama (log tampil di Colab)."""
+    """Jalankan skrip di kernel yang sama — log + banner jelas."""
     import runpy
 
     path = ROOT / rel_path
@@ -142,20 +159,26 @@ def run_inprocess(rel_path: str, *argv: str) -> None:
         os.environ["CASCADE_COLAB"] = "1"
     os.environ["PYTHONUNBUFFERED"] = "1"
 
+    label = path.name
+    t0 = step_start(label, " ".join(argv))
     old_argv = sys.argv[:]
     sys.argv = [str(path)] + list(argv)
-    print("\n" + "=" * 60)
-    print("IN-PROCESS", rel_path, " ".join(argv))
-    print("ROOT =", ROOT.resolve())
-    print("=" * 60)
     try:
         runpy.run_path(str(path), run_name="__main__")
+        step_ok(label, t0)
     except SystemExit as e:
         code = e.code if e.code is not None else 0
         if code != 0:
+            step_fail(label, t0, f"exit code {code}")
             raise RuntimeError(f"{rel_path} gagal (exit {code})") from e
+        step_ok(label, t0)
+    except Exception as e:
+        step_fail(label, t0, str(e))
+        raise
     finally:
         sys.argv = old_argv
+        sys.stdout.flush()
+        sys.stderr.flush()
 
 
 def pipeline_argv() -> list[str]:
@@ -176,20 +199,18 @@ def run_audit() -> None:
 # %%
 if RUN_FETCH_CLEAN_ENGINEER:
     pargs = pipeline_argv()
+    print("Tahap 1/3: FETCH (Binance, bisa 10-30 menit untuk 3 koin)...", flush=True)
     run_inprocess("pipeline/01_fetch.py", *pargs)
-    run_inprocess("pipeline/02_clean.py", *pargs)
-    run_inprocess("pipeline/03_engineer.py", *pargs)
-    from config import LABEL_DIR
+    status_table(ACTIVE_COINS, ROOT)
 
-    print("LABEL_DIR =", LABEL_DIR.resolve())
-    labeled = list(LABEL_DIR.glob("*_h4_lgbm.parquet"))
-    print("labeled files:", [p.name for p in labeled] or "(KOSONG)")
+    print("Tahap 2/3: CLEAN...", flush=True)
+    run_inprocess("pipeline/02_clean.py", *pargs)
+    status_table(ACTIVE_COINS, ROOT)
+
+    print("Tahap 3/3: ENGINEER...", flush=True)
+    run_inprocess("pipeline/03_engineer.py", *pargs)
+    status_table(ACTIVE_COINS, ROOT)
     run_audit()
-    if not labeled:
-        raise RuntimeError(
-            "Engineer selesai tapi tidak ada *_h4_lgbm.parquet. "
-            "Cek log fetch/clean di atas (harus ada SELESAI 3/3 dan Done 3/3)."
-        )
 
 # %% [markdown]
 # ## 4. Train LGBM (5-class, purged CV)
