@@ -141,7 +141,7 @@ def train_fold(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--all", action="store_true")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     logger.info(f"LGBM device_type={LGBM_PARAMS.get('device_type', '?')}")
     logger.info("Loading data...")
