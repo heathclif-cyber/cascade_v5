@@ -222,7 +222,7 @@ def main():
 
     # Feature importance top 20
     feat_imp = sorted(
-        zip(LGBM_FEATURE_COLS, final_model.feature_importances_),
+        zip(LGBM_FEATURE_COLS, final_model.feature_importance(importance_type="gain")),
         key=lambda x: x[1], reverse=True
     )
     logger.info("Top 10 feature importance:")
